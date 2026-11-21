@@ -1,0 +1,5 @@
+# 山海任务看板：同一行同时挂 Host 半区（任务引擎 + /api/shanhai-kanban/*）
+# 与 Client 半区（侧边栏入口 + 看板整页），Host 与 Client 共享同一个插件条目。
+- insert:
+    - id: shanhai-kanban
+      name: dsh-shanhai-kanban

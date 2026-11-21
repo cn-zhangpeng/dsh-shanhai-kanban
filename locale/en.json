@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Shanhai Task Board",
+    "description": "Create tasks ahead of time, pick a start time and one of your DSH workspaces, and chain tasks behind an upstream task. Statuses cover planned, running, interrupted, succeeded, and archived; interrupted tasks can resume, with catch-up on startup and retry on transient errors. Open it from the sidebar entry \"Task board\"."
+  }
+}
