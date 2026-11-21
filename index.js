@@ -840,11 +840,26 @@ export function apply(ctx) {
         if (blocking.length > 0) {
           throw new KanbanError(409, `该任务还有 ${blocking.length} 个未归档的下游任务，请先处理下游任务`)
         }
+        task.archivedFrom = task.status
         task.status = 'archived'
         task.archivedAt = Date.now()
         task.updatedAt = Date.now()
         store.put(task)
         await archiveSessionOf(task)
+        return { ok: true, task: publicTask(task) }
+      })
+    }
+
+    if (action === 'unarchive') {
+      return withLock(async () => {
+        const task = requireTask(body.id)
+        if (task.status !== 'archived') throw new KanbanError(409, '只有已归档的任务可以撤销归档')
+        task.status = task.archivedFrom === 'succeeded' || task.archivedFrom === 'interrupted' ? task.archivedFrom : 'interrupted'
+        task.archivedAt = null
+        task.archivedFrom = null
+        task.updatedAt = Date.now()
+        store.put(task)
+        if (task.sessionId) await unarchiveSessionOf(task.sessionId)
         return { ok: true, task: publicTask(task) }
       })
     }

@@ -392,6 +392,18 @@ assert.equal((await action({ action: 'archive', id: taskBId })).body.task.status
 assert.equal(calls.archivedSessions.length, 0, '同一会话仍被任务 A 使用时不应归档会话')
 assert.equal((await action({ action: 'archive', id: taskAId })).body.task.status, 'archived')
 assert.deepEqual(calls.archivedSessions, ['sess-1'], '归档最后一个使用该会话的任务时应归档会话')
+
+// ---------- 撤销归档：恢复任务状态与执行会话 ----------
+
+const restoredA = await action({ action: 'unarchive', id: taskAId })
+assert.equal(restoredA.status, 200)
+assert.equal(restoredA.body.task.status, 'succeeded', '撤销归档应恢复归档前的状态')
+assert.equal((await action({ action: 'unarchive', id: taskBId })).body.task.status, 'succeeded', '撤销归档应恢复成功状态')
+assert.ok(calls.unarchivedSessions.filter((id) => id === 'sess-1').length >= 3, '撤销归档应恢复执行会话')
+
+// 重新归档，再验证删除顺序
+await action({ action: 'archive', id: taskBId })
+await action({ action: 'archive', id: taskAId })
 assert.equal((await action({ action: 'delete', id: taskAId })).status, 200)
 assert.equal((await action({ action: 'delete', id: taskBId })).status, 200)
 

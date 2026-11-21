@@ -82,6 +82,11 @@ window.__ModuleLoader__.load({
       'confirm.cancel': '取消',
       'notice.done': '操作完成',
       'notice.refreshed': '已刷新',
+      'toast.archived': '任务已归档',
+      'toast.deleted': '任务已删除',
+      'toast.restored': '已恢复',
+      'toast.undo': '撤销',
+      'toast.close': '关闭',
       'empty.all': '还没有任务，点右上角「新建任务」开始吧。',
       'empty.archived': '没有已归档的任务。',
     }
@@ -149,6 +154,11 @@ window.__ModuleLoader__.load({
       'confirm.cancel': 'Cancel',
       'notice.done': 'Done',
       'notice.refreshed': 'Refreshed',
+      'toast.archived': 'Task archived',
+      'toast.deleted': 'Task deleted',
+      'toast.restored': 'Restored',
+      'toast.undo': 'Undo',
+      'toast.close': 'Close',
       'empty.all': 'No tasks yet. Click "New task" to get started.',
       'empty.archived': 'No archived tasks.',
     }
@@ -173,10 +183,14 @@ window.__ModuleLoader__.load({
 .skb-tab:hover{background:var(--dsw-alias-bg-layer-2,#f3f5f8);color:var(--dsw-alias-label-primary,#1f2328)}
 .skb-tab--active{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f7cff) 14%,transparent);color:var(--dsw-alias-brand-primary,#4f7cff);font-weight:600}
 .skb-count{margin-left:auto;color:var(--dsw-alias-label-secondary,#6b7280);font-size:12px}
-.skb-toasts{position:fixed;left:0;right:0;bottom:26px;display:flex;flex-direction:column;align-items:center;gap:8px;z-index:1400;pointer-events:none;padding:0 16px}
-.skb-toast{pointer-events:auto;display:flex;align-items:center;gap:12px;max-width:min(560px,92vw);border-radius:10px;padding:9px 14px;font-size:12.5px;line-height:1.5;box-shadow:0 8px 28px rgba(15,23,42,.28);border:1px solid transparent;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1f2328)}
-.skb-toast--info{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f7cff) 35%,transparent)}
-.skb-toast--error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 12%,var(--dsw-alias-bg-layer-1,#fff));border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 40%,transparent);color:var(--dsw-alias-state-error-primary,#c83b3b)}
+.skb-toast-host{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:1400;display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:none;width:min(760px,calc(100vw - 32px))}
+.skb-toast{pointer-events:auto;display:flex;align-items:center;gap:10px;max-width:100%;padding:8px 16px 8px 12px;border-radius:999px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l1,#e5e7eb);box-shadow:0 10px 30px rgba(15,23,42,.18);color:var(--dsw-alias-label-primary,#1f2328);font-size:13px;line-height:1.45}
+.skb-toast--error{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 45%,transparent)}
+.skb-toast-icon{flex:none;display:inline-flex}
+.skb-toast-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(560px,70vw)}
+.skb-toast-action{flex:none;border:0;background:none;padding:0 2px;color:var(--dsw-alias-brand-primary,#4f7cff);font:inherit;font-weight:600;cursor:pointer}
+.skb-toast-action:hover{text-decoration:underline}
+.skb-toast-close{flex:none;border:0;background:none;padding:0 0 0 2px;color:var(--dsw-alias-label-secondary,#6b7280);font:inherit;font-size:15px;line-height:1;cursor:pointer}
 .skb-board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;align-items:start}
 .skb-list{display:grid;grid-template-columns:minmax(0,760px);gap:10px}
 .skb-col{background:var(--dsw-alias-bg-layer-2,#f3f5f8);border:1px solid var(--dsw-alias-border-l1,#e3e6ec);border-radius:12px;padding:10px;min-height:140px}
@@ -308,6 +322,136 @@ window.__ModuleLoader__.load({
         h('rect', { x: 7, y: 8, width: 2.6, height: 9, rx: 1.1, fill: 'currentColor' }),
         h('rect', { x: 11.4, y: 8, width: 2.6, height: 6.5, rx: 1.1, fill: 'currentColor', opacity: 0.72 }),
         h('rect', { x: 15.8, y: 8, width: 2.6, height: 4, rx: 1.1, fill: 'currentColor', opacity: 0.46 }),
+      )
+    }
+
+    // 轻量 toast 通知：模块级 store，供 shell.overlay 中的 ToastHost 渲染，
+    // 视觉沿用它自带的会话提示样式（顶部居中胶囊 + 状态图标 + 可选操作）。
+    const TOASTS = []
+    const TOAST_SUBSCRIBERS = new Set()
+    let TOAST_SEQ = 0
+
+    function toastSnapshot() {
+      return TOASTS.slice()
+    }
+
+    function emitToasts() {
+      const snapshot = toastSnapshot()
+      for (const subscriber of TOAST_SUBSCRIBERS) {
+        try {
+          subscriber(snapshot)
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+
+    function dismissToast(id) {
+      const index = TOASTS.findIndex((item) => item.id === id)
+      if (index < 0) return
+      const [removed] = TOASTS.splice(index, 1)
+      if (removed && removed.timer) clearTimeout(removed.timer)
+      emitToasts()
+    }
+
+    function showToast(input) {
+      const item = {
+        id: ++TOAST_SEQ,
+        tone: input && input.tone ? input.tone : 'success',
+        text: String((input && input.text) || ''),
+        action: (input && input.action) || null,
+        timer: null,
+      }
+      TOASTS.push(item)
+      const timeout = input && input.timeout !== undefined ? input.timeout : 6000
+      if (timeout > 0) item.timer = setTimeout(() => dismissToast(item.id), timeout)
+      emitToasts()
+      return item.id
+    }
+
+    function subscribeToasts(fn) {
+      TOAST_SUBSCRIBERS.add(fn)
+      return () => {
+        TOAST_SUBSCRIBERS.delete(fn)
+      }
+    }
+
+    function ToastIcon(props) {
+      const tone = props && props.tone
+      const color =
+        tone === 'error'
+          ? 'var(--dsw-alias-state-error-primary,#c83b3b)'
+          : tone === 'info'
+            ? 'var(--dsw-alias-brand-primary,#4f7cff)'
+            : 'var(--dsw-alias-state-success-primary,#2f9e6e)'
+      return h(
+        'svg',
+        { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': 'true', className: 'skb-toast-icon' },
+        h('circle', { cx: 12, cy: 12, r: 10, fill: color }),
+        tone === 'error'
+          ? h('path', { d: 'M12 7.5v6.2', stroke: '#fff', strokeWidth: 2.2, strokeLinecap: 'round' })
+          : tone === 'info'
+            ? h('path', { d: 'M12 10.8v6', stroke: '#fff', strokeWidth: 2.2, strokeLinecap: 'round' })
+            : h('path', {
+                d: 'M7.6 12.3l2.9 2.9 5.8-6',
+                stroke: '#fff',
+                strokeWidth: 2.2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              }),
+        tone === 'error'
+          ? h('circle', { cx: 12, cy: 17, r: 1.15, fill: '#fff' })
+          : tone === 'info'
+            ? h('circle', { cx: 12, cy: 7.4, r: 1.15, fill: '#fff' })
+            : null,
+      )
+    }
+
+    function ToastHost() {
+      const [items, setItems] = React.useState(() => toastSnapshot())
+      React.useEffect(() => subscribeToasts((list) => setItems(list)), [])
+      if (items.length === 0) return null
+      return h(
+        'div',
+        { className: 'skb-toast-host', role: 'status', 'aria-live': 'polite' },
+        ...items.map((item) =>
+          h(
+            'div',
+            { key: item.id, className: `skb-toast skb-toast--${item.tone}` },
+            h(ToastIcon, { tone: item.tone }),
+            h('span', { className: 'skb-toast-text' }, item.text),
+            item.action
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'skb-toast-action',
+                    onClick: () => {
+                      dismissToast(item.id)
+                      try {
+                        Promise.resolve(item.action.onClick && item.action.onClick()).catch(() => {})
+                      } catch (_) {
+                        /* ignore */
+                      }
+                    },
+                  },
+                  item.action.label,
+                )
+              : null,
+            item.tone === 'error'
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'skb-toast-close',
+                    'aria-label': 'close',
+                    onClick: () => dismissToast(item.id),
+                  },
+                  '×',
+                )
+              : null,
+          ),
+        ),
       )
     }
 
@@ -621,13 +765,12 @@ window.__ModuleLoader__.load({
     function KanbanPage(props) {
       const t = props.t
       const [data, setData] = React.useState(null)
-      const [error, setError] = React.useState('')
-      const [notice, setNotice] = React.useState('')
       const [filter, setFilter] = React.useState('all')
       const [dialog, setDialog] = React.useState(null)
       const [confirmState, setConfirmState] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const mounted = React.useRef(true)
+      const lastLoadError = React.useRef('')
 
       const load = React.useCallback(async () => {
         try {
@@ -638,10 +781,14 @@ window.__ModuleLoader__.load({
           }
           if (mounted.current) {
             setData(body)
-            setError('')
+            lastLoadError.current = ''
           }
         } catch (err) {
-          if (mounted.current) setError(`${t('error.load')}：${err && err.message ? err.message : String(err)}`)
+          const message = `${t('error.load')}：${err && err.message ? err.message : String(err)}`
+          if (mounted.current && lastLoadError.current !== message) {
+            lastLoadError.current = message
+            showToast({ tone: 'error', text: message, timeout: 8000 })
+          }
         }
       }, [t])
 
@@ -659,12 +806,6 @@ window.__ModuleLoader__.load({
           if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
         }
       }, [load])
-
-      React.useEffect(() => {
-        if (!notice) return undefined
-        const timer = setTimeout(() => setNotice(''), 2600)
-        return () => clearTimeout(timer)
-      }, [notice])
 
       const act = React.useCallback(
         async (action, payload) => {
@@ -695,15 +836,42 @@ window.__ModuleLoader__.load({
           await act('create', { task: fields })
         }
         setDialog(null)
-        setNotice(t('notice.done'))
+        showToast({ tone: 'success', text: t('notice.done') })
       }
 
       async function runCardAction(name, task) {
         try {
           await act(name, { id: task.id })
-          setNotice(t('notice.done'))
+          showToast({ tone: 'success', text: t('notice.done') })
         } catch (err) {
-          setError(`${t('error.action')}：${err && err.message ? err.message : String(err)}`)
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
+        }
+      }
+
+      async function undoArchive(id) {
+        try {
+          await act('unarchive', { id })
+          showToast({ tone: 'success', text: t('toast.restored') })
+        } catch (err) {
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
+        }
+      }
+
+      async function undoDelete(task) {
+        try {
+          await act('create', {
+            task: {
+              title: task.title,
+              instruction: task.instruction,
+              workspaceId: task.workspaceId,
+              upstreamId: task.upstreamId,
+              scheduledAt: task.scheduledAt,
+              permissionPreset: task.permissionPreset,
+            },
+          })
+          showToast({ tone: 'success', text: t('toast.restored') })
+        } catch (err) {
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
         }
       }
 
@@ -720,10 +888,14 @@ window.__ModuleLoader__.load({
         const { kind, task } = confirmState
         try {
           await act(kind, { id: task.id })
-          setNotice(t('notice.done'))
           setConfirmState(null)
+          if (kind === 'archive') {
+            showToast({ tone: 'success', text: t('toast.archived'), action: { label: t('toast.undo'), onClick: () => undoArchive(task.id) } })
+          } else {
+            showToast({ tone: 'success', text: t('toast.deleted'), action: { label: t('toast.undo'), onClick: () => undoDelete(task) } })
+          }
         } catch (err) {
-          setError(`${t('error.action')}：${err && err.message ? err.message : String(err)}`)
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
         }
       }
 
@@ -868,23 +1040,6 @@ window.__ModuleLoader__.load({
               onConfirm: confirmRun,
             })
           : null,
-        notice || error
-          ? h(
-              'div',
-              { className: 'skb-toasts' },
-              notice
-                ? h('div', { className: 'skb-toast skb-toast--info' }, h('span', null, notice))
-                : null,
-              error
-                ? h(
-                    'div',
-                    { className: 'skb-toast skb-toast--error' },
-                    h('span', null, error),
-                    h('button', { type: 'button', className: 'skb-btn skb-btn--tiny skb-btn--ghost', onClick: () => setError('') }, '×'),
-                  )
-                : null,
-            )
-          : null,
       )
     }
 
@@ -900,9 +1055,12 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('main', () =>
         ctx.slots.register({ name: 'main', key: SLOT_ID }, () => h(KanbanPage, { t })),
       )
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register({ name: 'shell.overlay', id: 'shanhai-kanban-toasts', order: 95 }, () => h(ToastHost)),
+      )
     }
 
-    module.exports = { inject: ['slots', 'locale'], apply, KanbanPage, KanbanIcon }
+    module.exports = { inject: ['slots', 'locale'], apply, KanbanPage, KanbanIcon, ToastHost }
     return module.exports
   },
 })

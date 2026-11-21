@@ -118,6 +118,13 @@ const pageTree = pageElement.type(pageElement.props)
 assert.equal(pageTree.type, 'div')
 assert.ok(pageTree.props.className.includes('skb-page'))
 
+const toastOverlay = slotRegistrations.find((item) => item.definition.name === 'shell.overlay')
+assert.ok(toastOverlay, '应注册 shell.overlay 通知层')
+assert.equal(toastOverlay.definition.id, 'shanhai-kanban-toasts')
+const toastVNode = toastOverlay.component()
+assert.equal(toastVNode.type.name, 'ToastHost')
+assert.equal(toastVNode.type(toastVNode.props), null, '通知队列为空时不应渲染内容')
+
 const styleNode = pageTree.children.find((child) => child && child.type === 'style')
 assert.ok(styleNode, '看板应注入样式')
 assert.ok(styleNode.props.dangerouslySetInnerHTML.__html.includes('.skb-board'))
