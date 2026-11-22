@@ -66,6 +66,8 @@ assert.equal(nextRetryDelay(3, [10, 20]), 20)
 
 let sessionSeq = 0
 const sessions = new Map()
+// 每个会话当前的 pendingInput，用来模拟"在等用户回答/审批"。
+const sessionPendingInput = new Map()
 const calls = { created: [], prompts: [], presets: [], cancelled: [], archivedSessions: [], unarchivedSessions: [] }
 const listeners = new Map()
 const routes = new Map()
@@ -102,6 +104,16 @@ const sessionController = {
   async cancel(request) {
     calls.cancelled.push(request)
     return { ok: true }
+  },
+  async state(request) {
+    const sessionId = request && request.sessionId
+    return {
+      cursor: 0,
+      active: sessions.has(sessionId),
+      running: false,
+      queue: [],
+      pendingInput: (sessionPendingInput.get(sessionId) || []).slice(),
+    }
   },
 }
 
@@ -424,12 +436,63 @@ await waitFor(async () => {
   return task && task.status === 'running' ? task : null
 }, '任务 C 启动')
 
+// ---------- 等用户回答：running 但看板应标明"在等你" ----------
+
+const runningC = findTask(await getState(), taskCId)
+sessionPendingInput.set(runningC.sessionId, ['question'])
+emit(
+  'session/event',
+  { id: runningC.sessionId },
+  {
+    type: 'tool/call',
+    data: {
+      turn: 1,
+      step: 1,
+      callId: 'call-question',
+      name: 'ask_user_question',
+      arguments: JSON.stringify({
+        questions: [{ header: '算术小测', question: '3 + 4 等于几？请选择选项', options: [{ label: '5' }, { label: '7' }] }],
+      }),
+    },
+  },
+)
+const waitingTask = await waitFor(async () => {
+  const task = findTask(await getState(), taskCId)
+  return task && task.waiting ? task : null
+}, '读取到会话在等待用户回答')
+assert.equal(waitingTask.status, 'running', '等待回答时任务仍是执行中，不应被判定为中断')
+assert.equal(waitingTask.waiting, 'question')
+assert.ok(waitingTask.waitingQuestion.includes('3 + 4 等于几'), '卡片应拿得到问题摘要')
+
+// 用户回答后进入下一步：等待标记应消失。
+sessionPendingInput.set(runningC.sessionId, [])
+emit('session/event', { id: runningC.sessionId }, { type: 'step/start', data: { turn: 1, step: 2 } })
+await waitFor(async () => {
+  const task = findTask(await getState(), taskCId)
+  return task && !task.waiting ? task : null
+}, '回答后等待标记消失')
+
 const cancelled = await action({ action: 'cancel', id: taskCId })
 assert.equal(cancelled.status, 200)
 assert.equal(cancelled.body.task.status, 'interrupted')
 assert.ok(cancelled.body.task.interruptReason.includes('取消'))
 assert.equal(calls.cancelled.length, 1)
 assert.equal(calls.cancelled[0].sessionId, cancelled.body.task.sessionId)
+
+// ---------- 中断但会话里还有没回答的问题：不允许继续 ----------
+
+// 直接继续会把待回答的提问作废，用户看到的就是「没回答任务却结束了」。
+sessionPendingInput.set(cancelled.body.task.sessionId, ['question'])
+const blockedContinue = await action({ action: 'continue', id: taskCId })
+assert.equal(blockedContinue.status, 409, '有未回答提问时不得继续任务')
+assert.ok(blockedContinue.body.error.includes('没回答的问题'), '错误信息应说明还有没回答的问题')
+const interruptedWaiting = await waitFor(async () => {
+  const task = findTask(await getState(), taskCId)
+  return task && task.waiting ? task : null
+}, '中断任务仍能看到未回答的提问')
+assert.equal(interruptedWaiting.status, 'interrupted', '被拒绝的继续不应改变任务状态')
+assert.equal(interruptedWaiting.waiting, 'question', '中断但仍有待回答提问时应带等待标记')
+sessionPendingInput.set(cancelled.body.task.sessionId, [])
 
 // ---------- 下游阻断 ----------
 
@@ -468,7 +531,17 @@ assert.equal((await action({ action: 'delete', id: taskDId })).status, 200)
 
 const runningC2 = findTask(await getState(), taskCId)
 assert.equal(runningC2.status, 'interrupted')
+// 会话里没有待回答的提问后（会话状态有 1.5s 缓存，等它刷新），中断任务不应再带等待标记。
+await waitFor(async () => {
+  const task = findTask(await getState(), taskCId)
+  return task && !task.waiting ? task : null
+}, '清空待回答后中断任务的等待标记消失')
+const unarchivedBeforeContinue = calls.unarchivedSessions.length
 assert.equal((await action({ action: 'continue', id: taskCId })).status, 200)
+assert.ok(
+  calls.unarchivedSessions.length > unarchivedBeforeContinue,
+  '继续任务前应先取消会话归档，否则归档会话的回合会被内核直接拒绝',
+)
 
 await waitFor(async () => {
   const task = findTask(await getState(), taskCId)

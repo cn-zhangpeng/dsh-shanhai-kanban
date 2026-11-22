@@ -37,6 +37,9 @@ window.__ModuleLoader__.load({
       'tab.archived': '已归档',
       'status.planned': '计划中',
       'status.running': '执行中',
+      'status.waiting_question': '等待你回答',
+      'status.waiting_approval': '等待审批',
+      'status.waiting_other': '等待你操作',
       'status.interrupted': '已中断',
       'status.succeeded': '已成功',
       'status.archived': '已归档',
@@ -57,6 +60,11 @@ window.__ModuleLoader__.load({
       'card.no_workspace': '未指定',
       'card.due': '已到执行时间，等待启动',
       'card.waiting_upstream': '等待上游任务成功',
+      'card.waiting_question': '等待你的回答',
+      'card.waiting_approval': '等待你的审批',
+      'card.waiting_other': '等待你的操作',
+      'card.waiting_hint': '回答后会自动继续',
+  'card.waiting_interrupted_hint': '请先到对话里回答，回答后再点继续',
       'dialog.create': '新建任务',
       'dialog.edit': '编辑任务',
       'field.title': '任务名称',
@@ -109,6 +117,9 @@ window.__ModuleLoader__.load({
       'tab.archived': 'Archived',
       'status.planned': 'Planned',
       'status.running': 'Running',
+      'status.waiting_question': 'Waiting for answer',
+      'status.waiting_approval': 'Waiting for approval',
+      'status.waiting_other': 'Waiting for you',
       'status.interrupted': 'Interrupted',
       'status.succeeded': 'Succeeded',
       'status.archived': 'Archived',
@@ -129,6 +140,11 @@ window.__ModuleLoader__.load({
       'card.no_workspace': 'None',
       'card.due': 'Due now, waiting to start',
       'card.waiting_upstream': 'Waiting for the upstream task to succeed',
+      'card.waiting_question': 'Waiting for your answer',
+      'card.waiting_approval': 'Waiting for your approval',
+      'card.waiting_other': 'Waiting for you',
+      'card.waiting_hint': 'Continues automatically after you answer',
+  'card.waiting_interrupted_hint': 'Answer it in the conversation first, then click continue',
       'dialog.create': 'New task',
       'dialog.edit': 'Edit task',
       'field.title': 'Task name',
@@ -206,10 +222,12 @@ window.__ModuleLoader__.load({
 .skb-badge--interrupted{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c83b3b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 28%,transparent)}
 .skb-badge--succeeded{background:color-mix(in srgb,#2f9e6f 12%,transparent);color:#2f9e6f;border-color:color-mix(in srgb,#2f9e6f 30%,transparent)}
 .skb-badge--archived{background:var(--dsw-alias-bg-layer-3,#e9edf2);color:var(--dsw-alias-label-secondary,#6b7280)}
+.skb-badge--waiting{background:color-mix(in srgb,#d98324 14%,transparent);color:#b26b12;border-color:color-mix(in srgb,#d98324 34%,transparent)}
 .skb-meta{margin-top:7px;display:flex;flex-direction:column;gap:2px;color:var(--dsw-alias-label-secondary,#6b7280);font-size:11.5px;word-break:break-word}
 .skb-meta b{color:var(--dsw-alias-label-primary,#1f2328);font-weight:500}
 .skb-note{margin-top:7px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#6b7280);background:var(--dsw-alias-bg-layer-2,#f3f5f8);border-radius:7px;padding:6px 8px;word-break:break-word}
 .skb-note--error{color:var(--dsw-alias-state-error-primary,#c83b3b);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 7%,transparent)}
+.skb-note--waiting{color:#b26b12;background:color-mix(in srgb,#d98324 8%,transparent)}
 .skb-note--ok{color:#2f9e6f;background:color-mix(in srgb,#2f9e6f 8%,transparent)}
 .skb-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
 .skb-empty{padding:18px 8px;text-align:center;color:var(--dsw-alias-label-secondary,#6b7280);font-size:12px}
@@ -468,6 +486,12 @@ window.__ModuleLoader__.load({
         task.upstreamId &&
         !canRun
       const isOverdue = task.status === 'planned' && Date.parse(task.scheduledAt) <= (data.serverNow || Date.now())
+      // 任务仍是 running，但会话正在等用户回答/审批：徽章要如实反映"在等你"。
+      // 已中断任务的会话里如果还挂着没回答的问题，也要提示，否则用户点「继续」会把提问作废。
+      const waiting = task.status === 'running' && task.waiting ? String(task.waiting) : ''
+      const pendingOnInterrupted = task.status === 'interrupted' && task.waiting ? String(task.waiting) : ''
+      const badgeLabel = waiting ? t(`status.waiting_${waiting}`) : t(`status.${task.status}`)
+      const badgeClass = waiting ? 'skb-badge--waiting' : statusClass(task.status)
       return h(
         'div',
         { className: 'skb-card' },
@@ -475,7 +499,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'skb-card-head' },
           h('div', { className: 'skb-card-title' }, task.title),
-          h('span', { className: `skb-badge ${statusClass(task.status)}` }, t(`status.${task.status}`)),
+          h('span', { className: `skb-badge ${badgeClass}` }, badgeLabel),
         ),
         h(
           'div',
@@ -490,6 +514,17 @@ window.__ModuleLoader__.load({
         ),
         isOverdue && canRun ? h('div', { className: 'skb-note' }, t('card.due')) : null,
         waitingUpstream ? h('div', { className: 'skb-note' }, t('card.waiting_upstream')) : null,
+        waiting
+          ? h(
+              'div',
+              { className: 'skb-note skb-note--waiting' },
+              `${
+                waiting === 'question' && task.waitingQuestion
+                  ? `${t('card.waiting_question')}：${task.waitingQuestion}`
+                  : t(`card.waiting_${waiting}`)
+              } · ${t('card.waiting_hint')}`,
+            )
+          : null,
         task.lastReport && task.lastReport.summary
           ? h(
               'div',
@@ -499,6 +534,17 @@ window.__ModuleLoader__.load({
           : null,
         task.status === 'interrupted' && task.interruptReason
           ? h('div', { className: 'skb-note skb-note--error' }, task.interruptReason)
+          : null,
+        pendingOnInterrupted
+          ? h(
+              'div',
+              { className: 'skb-note skb-note--waiting' },
+              `${
+                pendingOnInterrupted === 'question' && task.waitingQuestion
+                  ? `${t('card.waiting_question')}：${task.waitingQuestion}`
+                  : t(`card.waiting_${pendingOnInterrupted}`)
+              } · ${t('card.waiting_interrupted_hint')}`,
+            )
           : null,
         task.status === 'running' && task.retryAt
           ? h('div', { className: 'skb-note' }, `${t('status.running')} · ${formatTime(task.retryAt)}`)

@@ -279,6 +279,10 @@ export function apply(ctx) {
 
   const activeBySession = new Map()
   const starting = new Set()
+  // 会话侧的「等待用户输入」标记。任务本身仍是 running，只是暂时停下来等回答/审批。
+  const waitingBySession = new Map()
+  const sessionStateCache = new Map()
+  const turnSteps = new Map()
 
   let workspaceList = []
   let presetList = []
@@ -356,6 +360,11 @@ export function apply(ctx) {
     task.retryAt = null
     task.updatedAt = Date.now()
     store.put(task)
+    if (task.sessionId) {
+      waitingBySession.delete(task.sessionId)
+      sessionStateCache.delete(task.sessionId)
+      turnSteps.delete(task.sessionId)
+    }
     console.warn(`[kanban] 任务「${task.title}」已中断：${reason}`)
   }
 
@@ -432,6 +441,64 @@ export function apply(ctx) {
     }
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  // 从 ask_user_question 的参数里取一句问题摘要，给看板卡片用。
+  function summarizeQuestions(rawArguments) {
+    let parsed = rawArguments
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed)
+      } catch {
+        parsed = null
+      }
+    }
+    const questions = parsed && Array.isArray(parsed.questions) ? parsed.questions : []
+    const first = questions.find((item) => item && typeof item.question === 'string' && item.question.trim())
+    if (!first) return ''
+    const text = String(first.question).replace(/\s+/g, ' ').trim()
+    return text.length > 80 ? `${text.slice(0, 80)}…` : text
+  }
+
+  // 被动读取会话状态：只问"是不是在等用户输入"，不触发任何执行。
+  // 会话可能刚结束或服务不可用，任何异常都当作"没有等待输入"。
+  async function readSessionState(sessionId) {
+    const controller = ctx.get('sessionController')
+    if (!controller || typeof controller.state !== 'function' || !sessionId) return null
+    const cached = sessionStateCache.get(sessionId)
+    if (cached && Date.now() - cached.at < 1500) return cached.value
+    let value = null
+    try {
+      value = await Promise.race([
+        controller.state({ sessionId }, new AbortController().signal),
+        sleep(1200).then(() => null),
+      ])
+    } catch (err) {
+      value = null
+    }
+    sessionStateCache.set(sessionId, { at: Date.now(), value })
+    return value
+  }
+
+  const PENDING_KINDS = ['question', 'approval', 'other']
+
+  // 判断 running 任务是否停在"等用户回答/审批"。服务端 pendingInput 是权威来源，
+  // 事件侧标记（tool/call 尚未返回）做兜底。
+  async function waitingOf(task) {
+    if (!task || !task.sessionId) return null
+    if (task.status !== 'running' && task.status !== 'interrupted') return null
+    const local = waitingBySession.get(task.sessionId)
+    const state = await readSessionState(task.sessionId)
+    const pending = state && Array.isArray(state.pendingInput) ? state.pendingInput : []
+    const kind = PENDING_KINDS.find((item) => pending.includes(item))
+    if (kind) return { waiting: kind, question: kind === 'approval' ? '' : (local && local.question) || '' }
+    // 事件侧兜底只对 running 生效：已中断任务若只剩本地标记，多半是过期状态。
+    if (task.status === 'running' && local) return { waiting: 'question', question: local.question || '' }
+    return null
+  }
+
   async function startTask(task) {
     if (!task || task.status !== 'planned' || starting.has(task.id)) return
     starting.add(task.id)
@@ -461,6 +528,9 @@ export function apply(ctx) {
       }
       task.sessionId = sessionId
       activeBySession.set(sessionId, task.id)
+      waitingBySession.delete(sessionId)
+      sessionStateCache.delete(sessionId)
+      turnSteps.set(sessionId, 0)
       task.status = 'running'
       task.attempts = 1
       task.retryAt = null
@@ -486,7 +556,15 @@ export function apply(ctx) {
       return
     }
     if (outcome.action === 'blocked') {
-      transitionToInterrupted(task, '等待你处理：回合阻塞，任务尚未完成')
+      // 被归档的会话会被内核在 pre-step 直接拒绝：整回合没有任何执行步骤。
+      // 这种"阻塞"其实是会话被归档/删除，点立即继续没意义，提示用户恢复。
+      const steps = task.sessionId ? turnSteps.get(task.sessionId) || 0 : 0
+      transitionToInterrupted(
+        task,
+        steps === 0
+          ? '执行会话被归档或已删除，回合无法开始。请到侧边栏「全部对话（显示已归档）」取消归档后点继续，点继续也会自动尝试取消归档。'
+          : '等待你处理：回合阻塞，任务尚未完成',
+      )
       return
     }
     if (outcome.action === 'abort') {
@@ -521,11 +599,31 @@ export function apply(ctx) {
 
   function onSessionEvent(session, event) {
     if (!session || !event || typeof event.type !== 'string') return
-    if (event.type !== 'turn/start' && event.type !== 'turn/end') return
+    const type = event.type
+    const data = event.data || {}
+    if (type === 'tool/call') {
+      // 阻塞式提问会让回合一直不结束，先记下「这个会话在等用户回答」。
+      if (data.name !== 'ask_user_question') return
+      waitingBySession.set(session.id, {
+        callId: data.callId ? String(data.callId) : '',
+        question: summarizeQuestions(data.arguments),
+        at: Date.now(),
+      })
+      return
+    }
+    if (type === 'step/start') {
+      // 有了新步骤，说明上一次阻塞调用已经返回，等待标记应当失效。
+      waitingBySession.delete(session.id)
+      turnSteps.set(session.id, (turnSteps.get(session.id) || 0) + 1)
+      return
+    }
+    if (type !== 'turn/start' && type !== 'turn/end') return
     const task = taskBySession(session.id)
     if (!task) return
-    if (event.type === 'turn/start') {
+    if (type === 'turn/start') {
       activeBySession.set(session.id, task.id)
+      waitingBySession.delete(session.id)
+      turnSteps.set(session.id, 0)
       task.awaitingTurn = false
       if (task.status === 'interrupted') {
         task.status = 'running'
@@ -537,7 +635,8 @@ export function apply(ctx) {
       }
       return
     }
-    onTurnEnd(task, event.data && event.data.reason)
+    waitingBySession.delete(session.id)
+    onTurnEnd(task, data.reason)
   }
 
   async function tick() {
@@ -698,12 +797,24 @@ export function apply(ctx) {
     }
   }
 
-  function serverState() {
+  async function serverState() {
     const titles = new Map(store.all().map((task) => [task.id, task.title]))
     const tasks = store.all().map((task) => ({
       ...publicTask(task),
       upstreamTitle: task.upstreamId ? titles.get(task.upstreamId) || '' : '',
     }))
+    // running 任务可能只是停下来等用户回答/审批，不是"卡死"。这里被动查一次会话状态。
+    // interrupted 任务也查：会话里可能还挂着没回答的问题，界面上要提示，避免用户点「继续」把提问作废。
+    await Promise.all(
+      tasks
+        .filter((task) => task.status === 'running' || task.status === 'interrupted')
+        .map(async (task) => {
+          const waiting = await waitingOf(task)
+          if (!waiting) return
+          task.waiting = waiting.waiting
+          if (waiting.question) task.waitingQuestion = waiting.question
+        }),
+    )
     tasks.sort((a, b) => {
       if (a.status === 'planned' && b.status === 'planned') {
         return Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt)
@@ -800,7 +911,25 @@ export function apply(ctx) {
         const task = requireTask(body.id)
         if (task.status !== 'interrupted') throw new KanbanError(409, '只有已中断的任务可以继续')
         if (!task.sessionId) throw new KanbanError(409, '任务没有执行会话，请删除后重建')
+        // 会话里可能还挂着没回答的问题 / 没处理的审批：此时发继续提示词，回合边界会把提问作废，
+        // 用户看到的就是「没回答，任务却结束了」。先拒绝，引导用户回答完再继续。
+        sessionStateCache.delete(task.sessionId)
+        const pendingState = await readSessionState(task.sessionId)
+        const pendingKinds = pendingState && Array.isArray(pendingState.pendingInput) ? pendingState.pendingInput : []
+        if (pendingKinds.includes('approval')) {
+          throw new KanbanError(409, '任务还有一个没处理的审批请求，请先到对话里处理，处理完再点继续')
+        }
+        if (pendingKinds.includes('question')) {
+          const localMarker = waitingBySession.get(task.sessionId)
+          const question = localMarker && localMarker.question ? `「${localMarker.question}」` : ''
+          throw new KanbanError(409, `任务还有一个没回答的问题${question}，请先在对话里回答，回答后再点继续`)
+        }
         const reason = task.interruptReason || '未知原因'
+        // 会话可能是用户从侧边栏删除/归档的：归档会拦截所有回合，先恢复再发提示词。
+        // 对未归档的会话是幂等的（不会写入）。
+        await unarchiveSessionOf(task.sessionId)
+        waitingBySession.delete(task.sessionId)
+        sessionStateCache.delete(task.sessionId)
         task.status = 'running'
         task.attempts = 1
         task.retryAt = null
@@ -808,7 +937,18 @@ export function apply(ctx) {
         task.lastError = null
         task.updatedAt = Date.now()
         activeBySession.set(task.sessionId, task.id)
-        await sendPrompt(task, buildContinuePrompt(task, reason))
+        try {
+          await sendPrompt(task, buildContinuePrompt(task, reason))
+        } catch (err) {
+          const message = String((err && err.message) || err || '未知错误')
+          transitionToInterrupted(
+            task,
+            /not.?found|不存在|missing|unknown session/i.test(message)
+              ? '执行会话已不存在（可能已被删除），请删除该任务后重建'
+              : `发送继续提示词失败：${message}`,
+          )
+          return { ok: true, task: publicTask(task) }
+        }
         return { ok: true, task: publicTask(task) }
       })
     }
@@ -915,7 +1055,7 @@ export function apply(ctx) {
         }
         try {
           await ready
-          return json(serverState())
+          return json(await serverState())
         } catch (err) {
           console.warn('[kanban] 读取状态失败：', err && err.message)
           return json({ ok: false, error: '读取看板状态失败' }, 500)

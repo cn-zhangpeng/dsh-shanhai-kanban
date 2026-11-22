@@ -1,6 +1,6 @@
 {
   "name": "dsh-shanhai-kanban",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "任务看板：预建任务、定时执行、指定工作区与上游依赖，支持中断继续、自动补跑与状态跟踪。",
   "type": "module",
