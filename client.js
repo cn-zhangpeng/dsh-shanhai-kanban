@@ -31,6 +31,9 @@ window.__ModuleLoader__.load({
       'action.cancel': '取消',
       'action.archive': '归档',
       'action.delete': '删除',
+      'action.open_session': '进入会话',
+      'toast.session_missing': '这个任务还没有关联的会话',
+      'toast.session_unavailable': '当前界面不支持跳转会话',
       'action.save': '保存',
       'action.submitting': '提交中…',
       'tab.all': '全部',
@@ -65,6 +68,32 @@ window.__ModuleLoader__.load({
       'card.waiting_other': '等待你的操作',
       'card.waiting_hint': '回答后会自动继续',
   'card.waiting_interrupted_hint': '请先到对话里回答，回答后再点继续',
+      'card.acceptance': '验收条件',
+      'card.inferred': '自动判定',
+      'card.needs_confirm': '本轮结果还没确认',
+      'card.evidence': '证据',
+      'card.runs': '运行记录',
+      'card.ack': '确认结果',
+      'card.acknowledged': '已确认',
+      'card.latest_run': '最近一次',
+      'run.running': '执行中',
+      'run.succeeded': '成功',
+      'run.interrupted': '中断',
+      'dock.title': '任务已有结果，等你确认',
+      'dock.result': '结论',
+      'dock.done_empty': '这一轮没有记录结论',
+      'dock.interrupt_empty': '这一轮没有记录中断原因',
+      'dock.inferred': '未主动上报，按回合结束状态自动判定',
+      'dock.confirm': '确认结果',
+      'dock.continue': '继续处理',
+      'dock.dismiss': '忽略',
+      'dock.detail': '详情',
+      'dock.collapse': '收起',
+      'dock.acknowledged': '已确认，看板已记账',
+      'toast.acknowledged': '已确认本轮结果',
+      'field.acceptance': '验收条件（可选）',
+      'field.acceptance.placeholder': '例如：报告写入 reports/week.md；npm test 全部通过',
+      'field.acceptance.hint': '写清“怎样算做完”，执行会话会按这些条件自检，结果里也能看到证据。',
       'dialog.create': '新建任务',
       'dialog.edit': '编辑任务',
       'field.title': '任务名称',
@@ -111,6 +140,9 @@ window.__ModuleLoader__.load({
       'action.cancel': 'Cancel',
       'action.archive': 'Archive',
       'action.delete': 'Delete',
+      'action.open_session': 'Open session',
+      'toast.session_missing': 'This task has no session yet',
+      'toast.session_unavailable': 'This host cannot navigate to sessions',
       'action.save': 'Save',
       'action.submitting': 'Submitting…',
       'tab.all': 'All',
@@ -145,6 +177,32 @@ window.__ModuleLoader__.load({
       'card.waiting_other': 'Waiting for you',
       'card.waiting_hint': 'Continues automatically after you answer',
   'card.waiting_interrupted_hint': 'Answer it in the conversation first, then click continue',
+      'card.acceptance': 'Acceptance',
+      'card.inferred': 'Inferred',
+      'card.needs_confirm': 'This result is not confirmed yet',
+      'card.evidence': 'Evidence',
+      'card.runs': 'Runs',
+      'card.ack': 'Confirm result',
+      'card.acknowledged': 'Confirmed',
+      'card.latest_run': 'Latest',
+      'run.running': 'Running',
+      'run.succeeded': 'Succeeded',
+      'run.interrupted': 'Interrupted',
+      'dock.title': 'A task has a result waiting for you',
+      'dock.result': 'Result',
+      'dock.done_empty': 'No result was recorded for this run',
+      'dock.interrupt_empty': 'No interruption reason was recorded for this run',
+      'dock.inferred': 'No explicit report; inferred from how the turn ended',
+      'dock.confirm': 'Confirm result',
+      'dock.continue': 'Keep working',
+      'dock.dismiss': 'Dismiss',
+      'dock.detail': 'Details',
+      'dock.collapse': 'Collapse',
+      'dock.acknowledged': 'Confirmed and recorded',
+      'toast.acknowledged': 'Result confirmed',
+      'field.acceptance': 'Acceptance criteria (optional)',
+      'field.acceptance.placeholder': 'e.g. report written to reports/week.md; npm test passes',
+      'field.acceptance.hint': 'Describe what "done" means; the run checks itself against these and reports evidence.',
       'dialog.create': 'New task',
       'dialog.edit': 'Edit task',
       'field.title': 'Task name',
@@ -244,6 +302,20 @@ window.__ModuleLoader__.load({
 .skb-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .skb-error{margin:0 0 12px;padding:7px 10px;border-radius:8px;font-size:12px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c83b3b) 9%,transparent);color:var(--dsw-alias-state-error-primary,#c83b3b)}
 .skb-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.skb-badge--inferred{background:color-mix(in srgb,#7c6bd6 12%,transparent);color:#6154b4;border-color:color-mix(in srgb,#7c6bd6 30%,transparent)}
+.skb-dock{pointer-events:auto;display:flex;flex-direction:column;gap:6px;width:100%;max-width:760px;margin:0 auto 8px;padding:7px 10px;border-radius:12px;border:1px solid color-mix(in srgb,#d98324 32%,transparent);background:color-mix(in srgb,#d98324 8%,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-primary,#1f2328);font-size:12.5px;line-height:1.5;box-shadow:0 2px 10px rgba(15,23,42,.06)}
+.skb-dock-head{display:flex;align-items:center;gap:8px;min-width:0}
+.skb-dock-icon{flex:none;width:17px;height:17px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#d98324;color:#fff;font-size:11px;font-weight:700;line-height:1}
+.skb-dock-title{flex:none;max-width:34%;min-width:0;font-weight:600;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.skb-dock-summary{flex:1 1 auto;min-width:40px;font-size:12px;color:var(--dsw-alias-label-secondary,#6b7280);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.skb-dock-head .skb-btn{flex:none}
+.skb-dock-body{display:flex;flex-direction:column;gap:3px;font-size:12px;line-height:1.55;color:var(--dsw-alias-label-secondary,#6b7280)}
+.skb-dock-line{word-break:break-word}
+.skb-dock-line b{color:var(--dsw-alias-label-primary,#1f2328);font-weight:600;margin-right:5px}
+.skb-dock-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
+.skb-runs{margin-top:7px;display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--dsw-alias-label-secondary,#6b7280)}
+.skb-runs-row{display:flex;gap:6px;align-items:baseline}
+.skb-runs-row b{font-weight:500;color:var(--dsw-alias-label-primary,#1f2328)}
 @media (max-width:1100px){.skb-board{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:680px){.skb-board{grid-template-columns:minmax(0,1fr)}.skb-row{grid-template-columns:1fr}}
 `
@@ -394,6 +466,183 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 看板数据源：整页和会话里的待确认卡片共用同一次轮询。
+    // Host 返回的 signature 没变就不通知订阅者，避免每 2s 全量重渲染。
+    const boardFeed = {
+      data: null,
+      error: '',
+      signature: '',
+      timer: null,
+      subscribers: new Set(),
+      notify() {
+        for (const subscriber of Array.from(this.subscribers)) {
+          try {
+            subscriber(this)
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      },
+      async load() {
+        try {
+          const response = await fetch(STATE_URL, { cache: 'no-store' })
+          const body = await response.json().catch(() => null)
+          if (!response.ok || !body || !body.ok) {
+            throw new Error((body && body.error) || `HTTP ${response.status}`)
+          }
+          const changed = !this.data || body.signature !== this.signature
+          const recovered = Boolean(this.error)
+          this.signature = body.signature || ''
+          this.data = body
+          this.error = ''
+          if (changed || recovered) this.notify()
+          return body
+        } catch (err) {
+          const message = err && err.message ? err.message : String(err)
+          if (this.error !== message) {
+            this.error = message
+            this.notify()
+          }
+          return null
+        }
+      },
+      subscribe(fn) {
+        this.subscribers.add(fn)
+        if (this.subscribers.size === 1 && !this.timer) {
+          this.load()
+          this.timer = setInterval(() => this.load(), 2000)
+        }
+        if (this.data || this.error) {
+          try {
+            fn(this)
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        return () => {
+          this.subscribers.delete(fn)
+          if (this.subscribers.size === 0 && this.timer) {
+            clearInterval(this.timer)
+            this.timer = null
+          }
+        }
+      },
+    }
+
+    async function postAction(action, payload) {
+      const response = await fetch(ACTION_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action, ...(payload || {}) }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || !body || !body.ok) {
+        throw new Error((body && body.error) || `HTTP ${response.status}`)
+      }
+      await boardFeed.load()
+      return body
+    }
+
+    // 会话输入框上方的待确认卡片：任务进入终态、且这一轮还没确认时出现。
+    // 只做提示，不影响下游任务解锁；点确认只记账本，不重复弹。
+    function SessionDockCard(props) {
+      const t = props.t
+      const sessionId = props.sessionId
+      const [snapshot, setSnapshot] = React.useState({ data: boardFeed.data })
+      const [dismissed, setDismissed] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [open, setOpen] = React.useState(false)
+      React.useEffect(() => {
+        if (!sessionId) return () => {}
+        return boardFeed.subscribe((feed) => setSnapshot({ data: feed.data }))
+      }, [sessionId])
+      if (!sessionId) return null
+      const tasks = (snapshot.data && snapshot.data.tasks) || []
+      const task = tasks.find((item) => item.sessionId === sessionId && item.needsConfirm)
+      if (!task || dismissed === task.id) return null
+      const lastRun = task.runs && task.runs.length > 0 ? task.runs[task.runs.length - 1] : null
+      const succeeded = task.status === 'succeeded'
+      const summary = (task.lastReport && task.lastReport.summary) || (lastRun && lastRun.summary) || ''
+      const detail = succeeded ? summary : task.interruptReason || (lastRun && lastRun.reason) || ''
+      const evidence = (task.lastReport && task.lastReport.evidence) || []
+      async function acknowledge() {
+        setBusy(true)
+        try {
+          await postAction('acknowledge', { id: task.id })
+          showToast({ tone: 'success', text: t('toast.acknowledged') })
+        } catch (err) {
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+      async function resume() {
+        setBusy(true)
+        try {
+          await postAction('continue', { id: task.id })
+          setDismissed(task.id)
+        } catch (err) {
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+      const verdict = succeeded ? summary || t('dock.done_empty') : detail || t('dock.interrupt_empty')
+      return h(
+        'div',
+        { className: 'skb-dock', role: 'status' },
+        h(
+          'div',
+          { className: 'skb-dock-head' },
+          h('span', { className: 'skb-dock-icon', 'aria-hidden': 'true' }, succeeded ? '✓' : '!'),
+          h('span', { className: 'skb-dock-title', title: task.title }, task.title),
+          h('span', { className: `skb-badge ${statusClass(task.status)}` }, t(`status.${task.status}`)),
+          h('span', { className: 'skb-dock-summary', title: verdict }, verdict),
+          h(
+            'button',
+            { type: 'button', className: 'skb-btn skb-btn--tiny skb-btn--primary', disabled: busy, onClick: acknowledge },
+            t('dock.confirm'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'skb-btn skb-btn--tiny skb-btn--ghost',
+              'aria-expanded': open,
+              onClick: () => setOpen(!open),
+            },
+            open ? t('dock.collapse') : t('dock.detail'),
+          ),
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'skb-dock-body' },
+              lastRun && lastRun.inferred ? h('div', { className: 'skb-dock-line' }, t('dock.inferred')) : null,
+              evidence.length > 0
+                ? h('div', { className: 'skb-dock-line' }, h('b', null, t('card.evidence')), evidence.slice(0, 3).join('；'))
+                : null,
+              h(
+                'div',
+                { className: 'skb-dock-actions' },
+                succeeded
+                  ? null
+                  : h(
+                      'button',
+                      { type: 'button', className: 'skb-btn skb-btn--tiny', disabled: busy, onClick: resume },
+                      t('dock.continue'),
+                    ),
+                h(
+                  'button',
+                  { type: 'button', className: 'skb-btn skb-btn--tiny skb-btn--ghost', disabled: busy, onClick: () => setDismissed(task.id) },
+                  t('dock.dismiss'),
+                ),
+              ),
+            )
+          : null,
+      )
+    }
+
     function ToastIcon(props) {
       const tone = props && props.tone
       const color =
@@ -492,6 +741,7 @@ window.__ModuleLoader__.load({
       const pendingOnInterrupted = task.status === 'interrupted' && task.waiting ? String(task.waiting) : ''
       const badgeLabel = waiting ? t(`status.waiting_${waiting}`) : t(`status.${task.status}`)
       const badgeClass = waiting ? 'skb-badge--waiting' : statusClass(task.status)
+      const lastRun = task.runs && task.runs.length > 0 ? task.runs[task.runs.length - 1] : null
       return h(
         'div',
         { className: 'skb-card' },
@@ -499,7 +749,14 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'skb-card-head' },
           h('div', { className: 'skb-card-title' }, task.title),
-          h('span', { className: `skb-badge ${badgeClass}` }, badgeLabel),
+          h(
+            'div',
+            { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end', flex: 'none' } },
+            lastRun && lastRun.inferred && task.status === 'succeeded'
+              ? h('span', { className: 'skb-badge skb-badge--inferred' }, t('card.inferred'))
+              : null,
+            h('span', { className: `skb-badge ${badgeClass}` }, badgeLabel),
+          ),
         ),
         h(
           'div',
@@ -532,6 +789,31 @@ window.__ModuleLoader__.load({
               `${t('card.report')}：${task.lastReport.summary}`,
             )
           : null,
+        task.lastReport && task.lastReport.evidence && task.lastReport.evidence.length > 0
+          ? h('div', { className: 'skb-note' }, `${t('card.evidence')}：${task.lastReport.evidence.join('；')}`)
+          : null,
+        task.acceptanceCriteria
+          ? h('div', { className: 'skb-note' }, `${t('card.acceptance')}：${task.acceptanceCriteria}`)
+          : null,
+        task.needsConfirm ? h('div', { className: 'skb-note skb-note--waiting' }, t('card.needs_confirm')) : null,
+        task.runs && task.runs.length > 1
+          ? h(
+              'div',
+              { className: 'skb-runs' },
+              ...task.runs
+                .slice(-3)
+                .reverse()
+                .map((run) =>
+                  h(
+                    'div',
+                    { key: run.id, className: 'skb-runs-row' },
+                    h('b', null, `${t('card.latest_run')} #${run.attempt || 1}`),
+                    h('span', null, `${t(`run.${run.status}`)} · ${formatTime(run.startedAt)}`),
+                    run.files && run.files.length > 0 ? h('span', null, run.files.slice(0, 2).join('、')) : null,
+                  ),
+                ),
+            )
+          : null,
         task.status === 'interrupted' && task.interruptReason
           ? h('div', { className: 'skb-note skb-note--error' }, task.interruptReason)
           : null,
@@ -552,6 +834,18 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'skb-card-actions' },
+          task.needsConfirm
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'skb-btn skb-btn--tiny skb-btn--primary',
+                  disabled: busy,
+                  onClick: () => props.onAck(task),
+                },
+                t('card.ack'),
+              )
+            : null,
           task.status === 'planned'
             ? h(
                 'button',
@@ -600,6 +894,18 @@ window.__ModuleLoader__.load({
                 t('action.edit'),
               )
             : null,
+          task.sessionId
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'skb-btn skb-btn--tiny skb-btn--ghost',
+                  disabled: busy,
+                  onClick: () => props.onOpenSession(task.sessionId),
+                },
+                t('action.open_session'),
+              )
+            : null,
           task.status === 'succeeded' || task.status === 'interrupted'
             ? h(
                 'button',
@@ -635,6 +941,7 @@ window.__ModuleLoader__.load({
       const editing = Boolean(task)
       const [title, setTitle] = React.useState(task ? task.title : '')
       const [instruction, setInstruction] = React.useState(task ? task.instruction : '')
+      const [acceptance, setAcceptance] = React.useState(task ? task.acceptanceCriteria || '' : '')
       const [workspaceId, setWorkspaceId] = React.useState(task ? task.workspaceId : data.workspaces[0] ? data.workspaces[0].id : '')
       const [upstreamId, setUpstreamId] = React.useState(task && task.upstreamId ? task.upstreamId : '')
       const [scheduledAt, setScheduledAt] = React.useState(task ? toLocalInput(task.scheduledAt) : defaultScheduledAt())
@@ -668,6 +975,7 @@ window.__ModuleLoader__.load({
           await props.onSubmit({
             title: title.trim(),
             instruction: instruction.trim(),
+            acceptanceCriteria: acceptance.trim(),
             workspaceId: effectiveWorkspaceId,
             upstreamId: upstreamId || null,
             scheduledAt: new Date(scheduledAt).toISOString(),
@@ -707,6 +1015,18 @@ window.__ModuleLoader__.load({
               placeholder: t('field.instruction.placeholder'),
               onChange: (event) => setInstruction(event.target.value),
             }),
+          ),
+          h(
+            'div',
+            { className: 'skb-field' },
+            h('label', null, t('field.acceptance')),
+            h('textarea', {
+              value: acceptance,
+              placeholder: t('field.acceptance.placeholder'),
+              style: { minHeight: '68px' },
+              onChange: (event) => setAcceptance(event.target.value),
+            }),
+            h('div', { className: 'skb-hint' }, t('field.acceptance.hint')),
           ),
           h(
             'div',
@@ -777,6 +1097,21 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'skb-modal-actions' },
+            task && task.sessionId
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'skb-btn skb-btn--ghost',
+                    style: { marginRight: 'auto' },
+                    onClick: () => {
+                      props.onClose()
+                      if (typeof props.onOpenSession === 'function') props.onOpenSession(task.sessionId)
+                    },
+                  },
+                  t('action.open_session'),
+                )
+              : null,
             h('button', { type: 'button', className: 'skb-btn skb-btn--ghost', onClick: props.onClose, disabled: submitting }, t('confirm.cancel')),
             h('button', { type: 'submit', className: 'skb-btn skb-btn--primary', disabled: submitting }, submitting ? t('action.submitting') : t('action.save')),
           ),
@@ -818,62 +1153,42 @@ window.__ModuleLoader__.load({
       const mounted = React.useRef(true)
       const lastLoadError = React.useRef('')
 
-      const load = React.useCallback(async () => {
-        try {
-          const response = await fetch(STATE_URL, { cache: 'no-store' })
-          const body = await response.json().catch(() => null)
-          if (!response.ok || !body || !body.ok) {
-            throw new Error((body && body.error) || `HTTP ${response.status}`)
-          }
-          if (mounted.current) {
-            setData(body)
-            lastLoadError.current = ''
-          }
-        } catch (err) {
-          const message = `${t('error.load')}：${err && err.message ? err.message : String(err)}`
-          if (mounted.current && lastLoadError.current !== message) {
-            lastLoadError.current = message
-            showToast({ tone: 'error', text: message, timeout: 8000 })
-          }
-        }
-      }, [t])
+      const load = React.useCallback(() => boardFeed.load(), [])
 
       React.useEffect(() => {
         mounted.current = true
-        load()
-        const timer = setInterval(load, 2000)
+        const unsubscribe = boardFeed.subscribe((feed) => {
+          if (!mounted.current) return
+          if (feed.error) {
+            const message = `${t('error.load')}：${feed.error}`
+            if (lastLoadError.current !== message) {
+              lastLoadError.current = message
+              showToast({ tone: 'error', text: message, timeout: 8000 })
+            }
+            return
+          }
+          setData(feed.data)
+          lastLoadError.current = ''
+        })
         const onVisibility = () => {
-          if (typeof document !== 'undefined' && document.visibilityState === 'visible') load()
+          if (typeof document !== 'undefined' && document.visibilityState === 'visible') boardFeed.load()
         }
         if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
         return () => {
           mounted.current = false
-          clearInterval(timer)
+          unsubscribe()
           if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
         }
-      }, [load])
+      }, [t])
 
-      const act = React.useCallback(
-        async (action, payload) => {
-          setBusy(true)
-          try {
-            const response = await fetch(ACTION_URL, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ action, ...(payload || {}) }),
-            })
-            const body = await response.json().catch(() => ({}))
-            if (!response.ok || !body || !body.ok) {
-              throw new Error((body && body.error) || `HTTP ${response.status}`)
-            }
-            await load()
-            return body
-          } finally {
-            setBusy(false)
-          }
-        },
-        [load],
-      )
+      const act = React.useCallback(async (action, payload) => {
+        setBusy(true)
+        try {
+          return await postAction(action, payload)
+        } finally {
+          setBusy(false)
+        }
+      }, [])
 
       async function submitDialog(fields) {
         if (dialog && dialog.task) {
@@ -892,6 +1207,11 @@ window.__ModuleLoader__.load({
         } catch (err) {
           showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
         }
+      }
+
+      // 打开任务会话属于界面导航，交给宿主服务处理；插件只负责把会话 id 传出去。
+      function openSession(sessionId) {
+        if (typeof props.onOpenSession === 'function') props.onOpenSession(sessionId)
       }
 
       async function undoArchive(id) {
@@ -923,6 +1243,15 @@ window.__ModuleLoader__.load({
 
       function askArchive(task) {
         setConfirmState({ kind: 'archive', task })
+      }
+
+      async function acknowledge(task) {
+        try {
+          await act('acknowledge', { id: task.id })
+          showToast({ tone: 'success', text: t('toast.acknowledged') })
+        } catch (err) {
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
+        }
       }
 
       function askDelete(task) {
@@ -988,6 +1317,8 @@ window.__ModuleLoader__.load({
                   onEdit: (item) => setDialog({ task: item }),
                   onAskArchive: askArchive,
                   onAskDelete: askDelete,
+                  onOpenSession: openSession,
+                  onAck: acknowledge,
                 }),
               ),
         )
@@ -996,7 +1327,6 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'skb-page' },
-        h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         h(
           'div',
           { className: 'skb-header' },
@@ -1058,6 +1388,8 @@ window.__ModuleLoader__.load({
                       onEdit: (item) => setDialog({ task: item }),
                       onAskArchive: askArchive,
                       onAskDelete: askDelete,
+                      onOpenSession: openSession,
+                  onAck: acknowledge,
                     }),
                   ),
                 )
@@ -1072,6 +1404,7 @@ window.__ModuleLoader__.load({
               t,
               data,
               task: dialog.task,
+              onOpenSession: openSession,
               onClose: () => setDialog(null),
               onSubmit: submitDialog,
             })
@@ -1089,9 +1422,44 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 样式在插件装载时注入一次，挂在 document.head 上：切到聊天页、看板页面被卸载后，
+    // 会话输入框上方的待确认卡片仍然有样式可用。
+    const STYLE_ID = 'shanhai-kanban-styles'
+
+    function mountStyles() {
+      if (typeof document === 'undefined' || !document.head) return () => {}
+      if (document.getElementById(STYLE_ID)) return () => {}
+      const element = document.createElement('style')
+      element.id = STYLE_ID
+      element.textContent = CSS
+      document.head.appendChild(element)
+      return () => {
+        if (element.parentNode) element.parentNode.removeChild(element)
+      }
+    }
+
     function apply(ctx) {
+      ctx.effect(() => mountStyles())
       ctx.effect(() => ctx.locale.register(NS, { zh, en }))
       const t = ctx.locale.bind(NS)
+
+      // 会话跳转走宿主提供的可选服务：宿主没有这个能力时只提示，不影响看板其他功能。
+      const openSession = (sessionId) => {
+        if (!sessionId) {
+          showToast({ tone: 'error', text: t('toast.session_missing') })
+          return
+        }
+        const workspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
+        if (!workspace || typeof workspace.openSession !== 'function') {
+          showToast({ tone: 'error', text: t('toast.session_unavailable') })
+          return
+        }
+        try {
+          workspace.openSession(sessionId)
+        } catch (err) {
+          showToast({ tone: 'error', text: `${t('error.action')}：${err && err.message ? err.message : String(err)}` })
+        }
+      }
       ctx.slots.inject('sidebar.panellist', () =>
         ctx.slots.register(
           { name: 'sidebar.panellist', id: SLOT_ID, order: 20, label: () => t('sidebar.label') },
@@ -1099,14 +1467,21 @@ window.__ModuleLoader__.load({
         ),
       )
       ctx.slots.inject('main', () =>
-        ctx.slots.register({ name: 'main', key: SLOT_ID }, () => h(KanbanPage, { t })),
+        ctx.slots.register({ name: 'main', key: SLOT_ID }, () => h(KanbanPage, { t, onOpenSession: openSession })),
+      )
+      // 会话输入框上方的待确认卡片：任务跑到终态、这一轮还没确认时出现。
+      ctx.slots.inject('conversation.input.dock', () =>
+        ctx.slots.register(
+          { name: 'conversation.input.dock', id: 'shanhai-kanban-confirm', order: 30 },
+          (props) => h(SessionDockCard, { sessionId: props && props.sessionId, t }),
+        ),
       )
       ctx.slots.inject('shell.overlay', () =>
         ctx.slots.register({ name: 'shell.overlay', id: 'shanhai-kanban-toasts', order: 95 }, () => h(ToastHost)),
       )
     }
 
-    module.exports = { inject: ['slots', 'locale'], apply, KanbanPage, KanbanIcon, ToastHost }
+    module.exports = { inject: ['slots', 'locale'], apply, KanbanPage, KanbanIcon, ToastHost, SessionDockCard, TaskCard }
     return module.exports
   },
 })

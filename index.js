@@ -2,11 +2,13 @@
  * 山海任务看板 —— Host 半区。
  *
  * 职责：
- *   - 任务存储（%DSH_HOME%/shanhai-kanban/tasks.json）
+ *   - 任务存储（%DSH_HOME%/shanhai-kanban/tasks.json），带字段长度上限、版本迁移与损坏自愈
  *   - 调度引擎：15s tick，到点且上游成功后启动；DSH 重启后补跑；瞬时错误自动重试
  *   - 执行：无上游任务新建会话；有上游任务复用上游会话串行执行
- *   - 收尾上报工具 kanban_report（仅任务执行会话可见）
- *   - 供看板页面使用的 HTTP 接口
+ *   - 结果判定：优先采信 kanban_report；没有上报时按回合结束原因 + 本轮动作推断
+ *   - 运行历史：每次尝试记一条 run（会话、起止时间、结论、改动文件、是否自动判定）
+ *   - 收尾上报工具 kanban_report（仅任务执行会话可见，可选调用）
+ *   - 供看板页面使用的 HTTP 接口，只对 owner 连接开放
  */
 
 import { randomUUID } from 'node:crypto'
@@ -27,6 +29,49 @@ export const DEFAULT_RETRY_DELAYS_MS = [30_000, 120_000, 300_000]
 export const MAX_ATTEMPTS = 3
 
 const STATUSES = ['planned', 'running', 'interrupted', 'succeeded', 'archived']
+const TERMINAL_STATUSES = ['interrupted', 'succeeded']
+
+/** 任务文件结构版本；旧文件读入后会自动补齐新字段。 */
+export const STORE_VERSION = 2
+
+/** 单个任务保留的运行记录条数，超出后丢弃最旧的。 */
+export const MAX_RUNS = 20
+
+/** 会改动工作区的工具；用于没有上报时判断"本轮到底做没做事"。 */
+const WRITE_TOOLS = new Set(['write', 'edit', 'apply_patch'])
+
+/** 字段长度上限：既挡住误粘贴的巨型文本，也避免看板状态接口被撑大。 */
+export const FIELD_LIMITS = {
+  title: 120,
+  instruction: 20_000,
+  acceptanceCriteria: 4_000,
+  workspaceTitle: 200,
+  workspacePath: 1_000,
+  interruptReason: 2_000,
+}
+
+const SUMMARY_LIMIT = 500
+const EVIDENCE_LIMIT = 10
+const EVIDENCE_ITEM_LIMIT = 500
+const FILE_LIST_LIMIT = 10
+
+export function clampText(value, max) {
+  const text = typeof value === 'string' ? value : value === null || value === undefined ? '' : String(value)
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}…`
+}
+
+/** 上报结果里的证据条目：最多 10 条、每条 500 字，其余一律丢弃。 */
+export function normalizeEvidence(input) {
+  if (!Array.isArray(input)) return []
+  const result = []
+  for (const item of input) {
+    const text = clampText(typeof item === 'string' ? item.trim() : '', EVIDENCE_ITEM_LIMIT)
+    if (text) result.push(text)
+    if (result.length >= EVIDENCE_LIMIT) break
+  }
+  return result
+}
 
 export function resolveDshHome(env = process.env, homeDir = homedir()) {
   const raw = env.DSH_HOME
@@ -107,7 +152,7 @@ class KanbanError extends Error {
   }
 }
 
-/** 任务存储：内存 Map + 防抖落盘（临时文件 + rename）。 */
+/** 任务存储：内存 Map + 防抖落盘（临时文件 + rename），文件损坏时先备份再重建。 */
 export function createStore(file) {
   const tasks = new Map()
   let saveTimer = null
@@ -115,23 +160,61 @@ export function createStore(file) {
   let dirty = false
   let closed = false
 
-  async function load() {
+  // 文件坏了不能静默清空：把原件挪进 backups/，用户至少还能自己捞回来。
+  const QUARANTINE_REASON = { json: '内容不是合法 JSON', shape: '结构不对（缺 tasks 数组）' }
+
+  async function quarantine(text, why) {
+    const reason = QUARANTINE_REASON[why] || why
     try {
-      const text = await readFile(file, 'utf8')
-      const parsed = JSON.parse(text)
-      const list = Array.isArray(parsed) ? parsed : parsed && Array.isArray(parsed.tasks) ? parsed.tasks : []
-      for (const task of list) {
-        if (task && typeof task.id === 'string') tasks.set(task.id, task)
-      }
+      const dir = path.join(path.dirname(file), 'backups')
+      await mkdir(dir, { recursive: true })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const target = path.join(dir, `${path.basename(file, '.json')}.broken-${stamp}.json`)
+      await writeFile(target, text, 'utf8')
+      console.warn(`[kanban] 任务文件无法使用（${reason}），已备份到 ${target}`)
+    } catch (err) {
+      console.warn('[kanban] 备份损坏的任务文件失败：', err && err.message)
+    }
+  }
+
+  async function load() {
+    let text = ''
+    try {
+      text = await readFile(file, 'utf8')
     } catch (err) {
       if (!err || err.code !== 'ENOENT') console.warn('[kanban] 读取任务文件失败：', err && err.message)
+      return
+    }
+    let parsed
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      await quarantine(text, 'json')
+      dirty = true
+      return
+    }
+    const list = Array.isArray(parsed) ? parsed : parsed && Array.isArray(parsed.tasks) ? parsed.tasks : null
+    if (!list) {
+      await quarantine(text, 'shape')
+      dirty = true
+      return
+    }
+    for (const raw of list) {
+      const task = normalizeTask(raw)
+      if (task) tasks.set(task.id, task)
+    }
+    const version = parsed && Number.isFinite(parsed.version) ? parsed.version : 1
+    if (version !== STORE_VERSION) {
+      // 旧结构由 normalizeTask 补齐字段，下一次落盘时换成新版本号。
+      dirty = true
+      console.warn(`[kanban] 任务文件版本 ${version} → ${STORE_VERSION}，已自动迁移`)
     }
   }
 
   function persist() {
     if (!dirty) return saveChain
     dirty = false
-    const body = JSON.stringify({ version: 1, tasks: Array.from(tasks.values()) }, null, 2)
+    const body = JSON.stringify({ version: STORE_VERSION, savedAt: Date.now(), tasks: Array.from(tasks.values()) }, null, 2)
     saveChain = saveChain
       .then(async () => {
         await mkdir(path.dirname(file), { recursive: true })
@@ -193,6 +276,40 @@ export function createStore(file) {
   }
 }
 
+/**
+ * 读盘时统一整理一条任务：补缺省字段、截断超长文本、丢掉坏掉的运行记录。
+ * 手改过 tasks.json 或从旧版本升级时，靠它保证内存里的任务形状一致。
+ */
+export function normalizeTask(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const id = typeof raw.id === 'string' ? raw.id : ''
+  if (!id) return null
+  const task = { ...raw, id }
+  task.status = STATUSES.includes(task.status) ? task.status : 'interrupted'
+  for (const [field, max] of Object.entries(FIELD_LIMITS)) {
+    if (typeof task[field] === 'string') task[field] = clampText(task[field], max)
+  }
+  if (typeof task.acceptanceCriteria !== 'string') task.acceptanceCriteria = ''
+  if (!Array.isArray(task.runs)) task.runs = []
+  task.runs = task.runs
+    .filter((run) => run && typeof run === 'object' && typeof run.id === 'string')
+    .slice(-MAX_RUNS)
+  if (task.confirmedRunId === undefined) task.confirmedRunId = null
+  if (task.currentRunId === undefined) task.currentRunId = null
+  return task
+}
+
+/** 轻量指纹：状态没变时客户端不必重新渲染，也方便用户对比两次轮询是否有变化。 */
+export function hashParts(parts) {
+  const text = parts.map((part) => String(part)).join('\u0001')
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(36)
+}
+
 /** 回合结束原因分类；返回 {action} 供看板状态机使用。 */
 export function classifyTurnEnd(reason) {
   if (!reason || typeof reason !== 'object') return { action: 'interrupt', reason: '未知结束原因' }
@@ -224,29 +341,55 @@ export function nextRetryDelay(attempts, retryDelays = DEFAULT_RETRY_DELAYS_MS) 
   return retryDelays[Math.min(attempts - 1, retryDelays.length - 1)]
 }
 
+/** 任务里写了验收条件时，拼进提示词，让执行会话知道"做到什么程度算完"。 */
+function acceptanceLines(task) {
+  const criteria = String((task && task.acceptanceCriteria) || '').trim()
+  if (!criteria) return []
+  return ['验收条件（全部满足才算完成）：', criteria, '']
+}
+
+/** 续跑/重试时把上一轮的结论和改动文件带回去，省得模型从头再摸一遍。 */
+function historyLines(task) {
+  const lines = []
+  const report = task.lastReport
+  const lastRun = Array.isArray(task.runs) && task.runs.length > 0 ? task.runs[task.runs.length - 1] : null
+  const summary = (report && report.summary) || (lastRun && lastRun.summary) || ''
+  if (summary) lines.push(`上一轮结论：${summary}`)
+  const files = lastRun && Array.isArray(lastRun.files) ? lastRun.files.slice(0, FILE_LIST_LIMIT) : []
+  if (files.length > 0) lines.push(`上一轮改动文件：${files.join('、')}`)
+  return lines.length > 0 ? [...lines, ''] : []
+}
+
+const REPORT_HINT = [
+  '完成后如果方便，调用 kanban_report 上报结果（status = success | failed | blocked，summary = 一句话结论）；',
+  '不上报也可以，看板会根据回合结束情况判断任务是否完成。',
+]
+
 function buildStartPrompt(task) {
   return [
     `你正在执行「任务看板」中的任务：${task.title}`,
     '',
+    ...acceptanceLines(task),
     '任务说明：',
     task.instruction,
     '',
     '执行要求：',
     '1. 直接开始执行，不要向用户确认；只有在缺少必须由用户提供的信息时才向用户提问。',
-    '2. 完成或确认无法继续后，必须调用 kanban_report 工具上报结果：',
-    '   status = success | failed | blocked，summary = 一句话结论。',
-    '3. 不要重复已经完成的工作。',
+    '2. 不要重复已经完成的工作。',
+    ...REPORT_HINT,
   ].join('\n')
 }
 
 function buildContinuePrompt(task, reason) {
   return [
-    `任务「${task.title}」上一次执行被中断。`,
+    `任务「${task.title}」上一次执行没有走完，现在从中断处继续。`,
     `中断原因：${reason}`,
     '',
-    '请接着上次的进度继续，不要重复已经完成的工作；如果需要用户补充信息，请向用户提问。',
-    '完成后必须调用 kanban_report 上报结果：status = success | failed | blocked，summary = 一句话结论。',
+    ...historyLines(task),
+    '接着已有进度继续，不要重复已经完成的部分；缺少必要信息时向用户提问。',
+    ...REPORT_HINT,
     '',
+    ...acceptanceLines(task),
     '任务说明：',
     task.instruction,
   ].join('\n')
@@ -257,10 +400,13 @@ function buildRetryPrompt(task) {
     ? `${task.lastError.code || ''} ${task.lastError.message || ''}`.trim()
     : ''
   return [
-    `任务「${task.title}」上一次执行因临时错误中断${error ? `（${error}）` : ''}。`,
-    '请从中断处继续，不要重复已经完成的工作；',
-    '完成后必须调用 kanban_report 上报结果：status = success | failed | blocked，summary = 一句话结论。',
+    `任务「${task.title}」上一次执行遇到临时错误${error ? `（${error}）` : ''}，现在自动重试。`,
     '',
+    ...historyLines(task),
+    '从中断处继续，不要重复已经完成的工作。',
+    ...REPORT_HINT,
+    '',
+    ...acceptanceLines(task),
     '任务说明：',
     task.instruction,
   ].join('\n')
@@ -282,7 +428,72 @@ export function apply(ctx) {
   // 会话侧的「等待用户输入」标记。任务本身仍是 running，只是暂时停下来等回答/审批。
   const waitingBySession = new Map()
   const sessionStateCache = new Map()
-  const turnSteps = new Map()
+  // 本轮回合的现场：走了几步、动过哪些文件。结果判定与续跑提示词都靠它。
+  const turnInfo = new Map()
+
+  function turnOf(sessionId) {
+    let info = turnInfo.get(sessionId)
+    if (!info) {
+      info = { steps: 0, files: [], touched: false }
+      turnInfo.set(sessionId, info)
+    }
+    return info
+  }
+
+  function resetTurnOf(sessionId) {
+    if (!sessionId) return
+    turnInfo.set(sessionId, { steps: 0, files: [], touched: false })
+  }
+
+  function currentRunOf(task) {
+    const runs = Array.isArray(task && task.runs) ? task.runs : []
+    return runs.find((run) => run.id === task.currentRunId) || runs[runs.length - 1] || null
+  }
+
+  // 每次真正发出提示词时开一条运行记录，失败重试/人工继续都算新的一次尝试。
+  function beginRun(task, sessionId, attempt) {
+    if (!Array.isArray(task.runs)) task.runs = []
+    const run = {
+      id: randomUUID(),
+      attempt: attempt || 1,
+      sessionId: sessionId || task.sessionId || null,
+      startedAt: Date.now(),
+      endedAt: null,
+      status: 'running',
+      reason: '',
+      summary: '',
+      files: [],
+      inferred: false,
+      needsAck: false,
+    }
+    task.runs.push(run)
+    if (task.runs.length > MAX_RUNS) task.runs.splice(0, task.runs.length - MAX_RUNS)
+    task.currentRunId = run.id
+    task.confirmedRunId = null
+    return run
+  }
+
+  function finishRun(task, patch) {
+    const run = currentRunOf(task)
+    if (!run || run.endedAt) return run
+    Object.assign(run, patch, { endedAt: Date.now() })
+    return run
+  }
+
+  // 从写文件类工具的参数里抠出路径，作为"本轮产物"的证据。
+  function fileArgumentOf(rawArguments) {
+    let parsed = rawArguments
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed)
+      } catch {
+        return ''
+      }
+    }
+    if (!parsed || typeof parsed !== 'object') return ''
+    const candidate = parsed.path || parsed.file_path || parsed.filePath || parsed.targetPath || ''
+    return typeof candidate === 'string' ? candidate : ''
+  }
 
   let workspaceList = []
   let presetList = []
@@ -354,18 +565,47 @@ export function apply(ctx) {
     return store.all().find((task) => task.sessionId === sessionId && (task.status === 'running' || task.status === 'interrupted'))
   }
 
-  function transitionToInterrupted(task, reason) {
+  function cleanSessionMarks(sessionId) {
+    if (!sessionId) return
+    waitingBySession.delete(sessionId)
+    sessionStateCache.delete(sessionId)
+    turnInfo.delete(sessionId)
+  }
+
+  function transitionToInterrupted(task, reason, options = {}) {
+    const text = clampText(reason, FIELD_LIMITS.interruptReason)
+    finishRun(task, {
+      status: 'interrupted',
+      reason: text,
+      files: options.files ? options.files.slice(0, FILE_LIST_LIMIT) : [],
+      // 用户主动取消/归档不算"要你确认"的终态，不弹待确认卡片。
+      needsAck: !options.silent,
+    })
     task.status = 'interrupted'
-    task.interruptReason = reason
+    task.interruptReason = text
     task.retryAt = null
     task.updatedAt = Date.now()
     store.put(task)
-    if (task.sessionId) {
-      waitingBySession.delete(task.sessionId)
-      sessionStateCache.delete(task.sessionId)
-      turnSteps.delete(task.sessionId)
-    }
-    console.warn(`[kanban] 任务「${task.title}」已中断：${reason}`)
+    cleanSessionMarks(task.sessionId)
+    console.warn(`[kanban] 任务「${task.title}」已中断：${text}`)
+  }
+
+  function transitionToSucceeded(task, summary, options = {}) {
+    finishRun(task, {
+      status: 'succeeded',
+      summary: clampText(summary, SUMMARY_LIMIT),
+      reason: '',
+      files: options.files ? options.files.slice(0, FILE_LIST_LIMIT) : [],
+      inferred: Boolean(options.inferred),
+      needsAck: !options.silent,
+    })
+    task.status = 'succeeded'
+    task.retryAt = null
+    task.interruptReason = null
+    task.updatedAt = Date.now()
+    store.put(task)
+    cleanSessionMarks(task.sessionId)
+    if (!options.inferred) console.log(`[kanban] 任务「${task.title}」执行成功`)
   }
 
   async function applyPreset(sessionId, presetName) {
@@ -528,9 +768,9 @@ export function apply(ctx) {
       }
       task.sessionId = sessionId
       activeBySession.set(sessionId, task.id)
-      waitingBySession.delete(sessionId)
-      sessionStateCache.delete(sessionId)
-      turnSteps.set(sessionId, 0)
+      cleanSessionMarks(sessionId)
+      resetTurnOf(sessionId)
+      beginRun(task, sessionId, 1)
       task.status = 'running'
       task.attempts = 1
       task.retryAt = null
@@ -545,6 +785,31 @@ export function apply(ctx) {
     }
   }
 
+  // 没有 kanban_report 时的兜底判定：本轮有真实动作/产物就判成功，什么都没做就记中断让用户确认。
+  function inferVerdict(task) {
+    const info = (task.sessionId && turnInfo.get(task.sessionId)) || { steps: 0, files: [], touched: false }
+    const files = Array.from(new Set(info.files)).slice(0, FILE_LIST_LIMIT)
+    if (info.steps === 0) {
+      return { status: 'interrupted', reason: '模型结束了回合，但没有执行任何步骤，也没有上报结果', files }
+    }
+    if (info.touched || files.length > 0) {
+      return {
+        status: 'succeeded',
+        summary:
+          files.length > 0
+            ? `未上报，按回合结束判定为完成（改动 ${files.length} 个文件）`
+            : `未上报，按回合结束判定为完成（执行了 ${info.steps} 步）`,
+        files,
+        inferred: true,
+      }
+    }
+    return {
+      status: 'interrupted',
+      reason: '模型结束了回合，但没有改动文件，也没有上报结果，请确认任务是否已完成',
+      files,
+    }
+  }
+
   function onTurnEnd(task, reason) {
     if (!task || task.status !== 'running') return
     // 排队中的下一条 prompt 尚未开始，此时收到的 turn/end 属于上一条消息的回合。
@@ -552,13 +817,18 @@ export function apply(ctx) {
     const outcome = classifyTurnEnd(reason)
     if (outcome.action === 'ignore') return
     if (outcome.action === 'completed') {
-      transitionToInterrupted(task, '模型结束了回合，但没有调用 kanban_report 上报结果')
+      const verdict = inferVerdict(task)
+      if (verdict.status === 'succeeded') {
+        transitionToSucceeded(task, verdict.summary, { files: verdict.files, inferred: true })
+      } else {
+        transitionToInterrupted(task, verdict.reason, { files: verdict.files })
+      }
       return
     }
     if (outcome.action === 'blocked') {
       // 被归档的会话会被内核在 pre-step 直接拒绝：整回合没有任何执行步骤。
       // 这种"阻塞"其实是会话被归档/删除，点立即继续没意义，提示用户恢复。
-      const steps = task.sessionId ? turnSteps.get(task.sessionId) || 0 : 0
+      const steps = task.sessionId ? turnOf(task.sessionId).steps : 0
       transitionToInterrupted(
         task,
         steps === 0
@@ -602,8 +872,15 @@ export function apply(ctx) {
     const type = event.type
     const data = event.data || {}
     if (type === 'tool/call') {
+      const name = typeof data.name === 'string' ? data.name : ''
+      const info = turnOf(session.id)
+      if (WRITE_TOOLS.has(name)) {
+        info.touched = true
+        const file = fileArgumentOf(data.arguments)
+        if (file && !info.files.includes(file)) info.files.push(file)
+      }
       // 阻塞式提问会让回合一直不结束，先记下「这个会话在等用户回答」。
-      if (data.name !== 'ask_user_question') return
+      if (name !== 'ask_user_question') return
       waitingBySession.set(session.id, {
         callId: data.callId ? String(data.callId) : '',
         question: summarizeQuestions(data.arguments),
@@ -614,7 +891,7 @@ export function apply(ctx) {
     if (type === 'step/start') {
       // 有了新步骤，说明上一次阻塞调用已经返回，等待标记应当失效。
       waitingBySession.delete(session.id)
-      turnSteps.set(session.id, (turnSteps.get(session.id) || 0) + 1)
+      turnOf(session.id).steps += 1
       return
     }
     if (type !== 'turn/start' && type !== 'turn/end') return
@@ -623,13 +900,14 @@ export function apply(ctx) {
     if (type === 'turn/start') {
       activeBySession.set(session.id, task.id)
       waitingBySession.delete(session.id)
-      turnSteps.set(session.id, 0)
+      resetTurnOf(session.id)
       task.awaitingTurn = false
       if (task.status === 'interrupted') {
         task.status = 'running'
         task.attempts = Math.max(1, task.attempts || 1)
         task.retryAt = null
         task.interruptReason = null
+        beginRun(task, session.id, task.attempts)
         task.updatedAt = Date.now()
         store.put(task)
       }
@@ -649,6 +927,8 @@ export function apply(ctx) {
           continue
         }
         task.retryAt = null
+        resetTurnOf(task.sessionId)
+        beginRun(task, task.sessionId, task.attempts)
         try {
           await sendPrompt(task, buildRetryPrompt(task))
         } catch (err) {
@@ -702,6 +982,14 @@ export function apply(ctx) {
     if (!title) throw new KanbanError(400, '任务名称不能为空')
     const instruction = String(data.instruction || '').trim()
     if (!instruction) throw new KanbanError(400, '任务内容不能为空')
+    if (title.length > FIELD_LIMITS.title) throw new KanbanError(400, `任务名称最多 ${FIELD_LIMITS.title} 字`)
+    if (instruction.length > FIELD_LIMITS.instruction) {
+      throw new KanbanError(400, `任务内容最多 ${FIELD_LIMITS.instruction} 字`)
+    }
+    const acceptanceCriteria = String(data.acceptanceCriteria || '').trim()
+    if (acceptanceCriteria.length > FIELD_LIMITS.acceptanceCriteria) {
+      throw new KanbanError(400, `验收条件最多 ${FIELD_LIMITS.acceptanceCriteria} 字`)
+    }
     const rawScheduledAt = String(data.scheduledAt || '')
     const scheduledAt = Date.parse(rawScheduledAt)
     if (!rawScheduledAt || Number.isNaN(scheduledAt)) throw new KanbanError(400, '执行时间格式不正确')
@@ -743,6 +1031,7 @@ export function apply(ctx) {
     return {
       title,
       instruction,
+      acceptanceCriteria,
       scheduledAt: new Date(scheduledAt).toISOString(),
       upstreamId,
       workspaceId,
@@ -765,6 +1054,9 @@ export function apply(ctx) {
       lastError: null,
       lastReport: null,
       interruptReason: null,
+      runs: [],
+      currentRunId: null,
+      confirmedRunId: null,
       createdAt: now,
       updatedAt: now,
       lastRunAt: null,
@@ -772,11 +1064,19 @@ export function apply(ctx) {
     }
   }
 
+  /** 进入终态但用户还没确认的这一轮，才需要在会话里弹待确认卡片。 */
+  function needsConfirmOf(task) {
+    if (!TERMINAL_STATUSES.includes(task.status)) return false
+    const run = currentRunOf(task)
+    return Boolean(run && run.needsAck && task.confirmedRunId !== run.id)
+  }
+
   function publicTask(task) {
     return {
       id: task.id,
       title: task.title,
       instruction: task.instruction,
+      acceptanceCriteria: task.acceptanceCriteria || '',
       workspaceId: task.workspaceId,
       workspaceTitle: task.workspaceTitle,
       workspacePath: task.workspacePath,
@@ -790,6 +1090,9 @@ export function apply(ctx) {
       lastError: task.lastError,
       lastReport: task.lastReport,
       interruptReason: task.interruptReason,
+      // 只回传最近几条：看板状态每 2s 拉一次，历史全量会把响应撑大。
+      runs: Array.isArray(task.runs) ? task.runs.slice(-8) : [],
+      needsConfirm: needsConfirmOf(task),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       lastRunAt: task.lastRunAt,
@@ -821,8 +1124,31 @@ export function apply(ctx) {
       }
       return (b.updatedAt || 0) - (a.updatedAt || 0)
     })
+    // 指纹只覆盖"会改变界面"的字段：客户端（和会话里的待确认卡片）比对一致就跳过重渲染。
+    const signature = hashParts([
+      tasks
+        .map((task) =>
+          [
+            task.id,
+            task.status,
+            task.updatedAt,
+            task.attempts,
+            task.retryAt,
+            task.sessionId || '',
+            task.needsConfirm ? 1 : 0,
+            task.waiting || '',
+            task.waitingQuestion || '',
+            (task.runs || []).length,
+          ].join(':'),
+        )
+        .join('|'),
+      workspaceList.map((item) => item.id).join(','),
+      presetList.map((item) => item.name).join(','),
+      presetDefault,
+    ])
     return {
       ok: true,
+      signature,
       serverNow: Date.now(),
       tasks,
       workspaces: workspaceList.slice(),
@@ -834,6 +1160,7 @@ export function apply(ctx) {
     }
   }
 
+  // 执行会话自己声明结果。这是可选动作：没有声明时由 onTurnEnd 按回合结束状态推断。
   function reportResult(sessionId, args) {
     const task = taskBySession(sessionId)
     if (!task) throw new Error('当前会话不是任务看板任务，无法上报结果')
@@ -842,23 +1169,41 @@ export function apply(ctx) {
     if (!['success', 'failed', 'blocked'].includes(status)) {
       throw new Error('status 必须是 success / failed / blocked')
     }
-    const summary = String((args && args.summary) || '').trim()
-    task.lastReport = { status, summary, at: Date.now() }
+    const summary = clampText(String((args && args.summary) || '').trim(), SUMMARY_LIMIT)
+    const evidence = normalizeEvidence(args && args.evidence)
+    task.lastReport = { status, summary, evidence, at: Date.now() }
     task.updatedAt = Date.now()
     if (status === 'success') {
-      task.status = 'succeeded'
-      task.retryAt = null
-      task.interruptReason = null
+      transitionToSucceeded(task, summary || '任务完成', {})
     } else if (status === 'failed') {
-      task.status = 'interrupted'
-      task.interruptReason = `任务失败：${summary || '未说明原因'}`
+      transitionToInterrupted(task, `任务失败：${summary || '未说明原因'}`, {})
     } else {
-      task.status = 'interrupted'
-      task.interruptReason = `等待人工：${summary || '需要补充信息'}`
+      transitionToInterrupted(task, `等待人工：${summary || '需要补充信息'}`, {})
     }
-    store.put(task)
-    if (task.status === 'succeeded') console.log(`[kanban] 任务「${task.title}」上报成功`)
     return { ok: true, taskId: task.id, status: task.status }
+  }
+
+  // 看板接口只对 owner 连接开放：浏览器请求必须带着当前进程签发、仍然有效的凭据。
+  // 鉴权服务本身出错时一律拒绝（fail-closed），避免异常路径变成"谁都能改任务"。
+  let authWarned = false
+  function authorize(headers) {
+    const connection = ctx.get('connection')
+    if (!connection || typeof connection.admit !== 'function') {
+      if (!authWarned) {
+        authWarned = true
+        console.warn('[kanban] connection 服务不可用，看板接口未启用连接鉴权')
+      }
+      return { ok: true }
+    }
+    try {
+      const admission = connection.admit({ headers })
+      const principal = admission && admission.peer && admission.peer.principal
+      if (principal && principal.kind === 'owner') return { ok: true }
+      return { ok: false, status: 403 }
+    } catch (err) {
+      console.warn('[kanban] 连接鉴权失败，已拒绝请求：', err && err.message)
+      return { ok: false, status: 403 }
+    }
   }
 
   async function handleAction(body) {
@@ -885,6 +1230,7 @@ export function apply(ctx) {
         if (patch.upstreamId === undefined) patch.upstreamId = task.upstreamId
         if (patch.workspaceId === undefined) patch.workspaceId = task.workspaceId
         if (patch.permissionPreset === undefined) patch.permissionPreset = task.permissionPreset
+        if (patch.acceptanceCriteria === undefined) patch.acceptanceCriteria = task.acceptanceCriteria || ''
         Object.assign(task, validateTask(patch, task.id), { updatedAt: Date.now() })
         store.put(task)
         return { ok: true, task: publicTask(task) }
@@ -937,6 +1283,9 @@ export function apply(ctx) {
         task.lastError = null
         task.updatedAt = Date.now()
         activeBySession.set(task.sessionId, task.id)
+        resetTurnOf(task.sessionId)
+        beginRun(task, task.sessionId, task.attempts)
+        store.put(task)
         try {
           await sendPrompt(task, buildContinuePrompt(task, reason))
         } catch (err) {
@@ -965,7 +1314,20 @@ export function apply(ctx) {
             console.warn('[kanban] 取消会话失败：', err && err.message)
           }
         }
-        transitionToInterrupted(task, '已取消')
+        transitionToInterrupted(task, '已取消', { silent: true })
+        return { ok: true, task: publicTask(task) }
+      })
+    }
+
+    if (action === 'acknowledge') {
+      // 会话里的「待确认」卡片点确认：只记账本，不改任务状态、不阻塞下游。
+      return withLock(async () => {
+        const task = requireTask(body.id)
+        const run = currentRunOf(task)
+        if (!run) throw new KanbanError(409, '任务还没有运行记录')
+        task.confirmedRunId = run.id
+        task.updatedAt = Date.now()
+        store.put(task)
         return { ok: true, task: publicTask(task) }
       })
     }
@@ -1025,14 +1387,9 @@ export function apply(ctx) {
 
   const ready = (async () => {
     await store.load()
-    const now = Date.now()
     for (const task of store.all()) {
       if (task.status === 'running') {
-        task.status = 'interrupted'
-        task.interruptReason = 'DSH 重启，任务执行被中断'
-        task.retryAt = null
-        task.updatedAt = now
-        store.put(task)
+        transitionToInterrupted(task, 'DSH 重启，任务执行被中断')
       }
     }
     // 兼容旧数据：已归档的任务如果还留着未被归档的执行会话，补一次归档。
@@ -1053,6 +1410,8 @@ export function apply(ctx) {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
           return json({ ok: false, error: '仅支持 GET' }, 405)
         }
+        const auth = authorize(request.headers)
+        if (!auth.ok) return json({ ok: false, error: '需要授权访问' }, auth.status)
         try {
           await ready
           return json(await serverState())
@@ -1073,6 +1432,11 @@ export function apply(ctx) {
         if (method !== 'POST') {
           res.writeHead(405, { allow: 'POST' })
           res.end('Method Not Allowed')
+          return
+        }
+        const auth = authorize(req.headers)
+        if (!auth.ok) {
+          sendJson(res, { ok: false, error: '需要授权访问' }, false, auth.status)
           return
         }
         let body
@@ -1119,7 +1483,7 @@ export function apply(ctx) {
       {
         name: 'kanban_report',
         description:
-          '任务看板任务的收尾上报工具。任务完成、失败或需要用户补充信息时调用，向看板报告状态与一句话结论。仅任务看板创建的执行会话可用。',
+          '任务看板任务的收尾上报工具（可选）。任务完成、失败或需要用户补充信息时调用，向看板报告状态、一句话结论和可选证据；不调用也可以，看板会按回合结束状态推断结果。仅任务看板创建的执行会话可用。',
         parameters: {
           type: 'object',
           properties: {
@@ -1128,9 +1492,15 @@ export function apply(ctx) {
               enum: ['success', 'failed', 'blocked'],
               description: 'success=任务完成；failed=确认失败；blocked=需要用户补充信息或做选择才能继续',
             },
-            summary: { type: 'string', description: '一句话结果说明' },
+            summary: { type: 'string', description: '一句话结果说明，建议填写' },
+            evidence: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: 10,
+              description: '可选：支撑结论的证据，例如生成的文件、执行过的验证命令与结果、关键数字',
+            },
           },
-          required: ['status', 'summary'],
+          required: ['status'],
           additionalProperties: false,
         },
         output: {

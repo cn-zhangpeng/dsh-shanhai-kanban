@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -151,9 +151,23 @@ const tools = {
   },
 }
 
+// connection.admit 契约：owner 放行；用测试请求头模拟"非 owner"和"鉴权异常"。
+const connection = {
+  admit(request) {
+    const headers = request && request.headers
+    const flag =
+      headers && typeof headers.get === 'function'
+        ? headers.get('x-kanban-test-auth')
+        : headers && headers['x-kanban-test-auth']
+    if (flag === 'deny') return { rejection: 403 }
+    if (flag === 'boom') throw new Error('auth exploded')
+    return { peer: { principal: { kind: 'owner' } } }
+  },
+}
+
 const ctx = {
   get(key) {
-    return { webServer, sessionController, sessions, permissionPresets, workspaceRegistry, tools }[key]
+    return { webServer, sessionController, sessions, permissionPresets, workspaceRegistry, tools, connection }[key]
   },
   on(event, handler) {
     const list = listeners.get(event) || []
@@ -331,8 +345,9 @@ const continued = await action({ action: 'continue', id: taskAId })
 assert.equal(continued.status, 200)
 assert.equal(continued.body.task.status, 'running')
 await waitFor(() => calls.prompts.length >= 4, '发送继续提示词')
-assert.ok(promptText(calls.prompts[3]).includes('上一次执行被中断'), '继续提示词应说明中断')
-assert.ok(promptText(calls.prompts[3]).includes('不要重复已经完成的工作'))
+assert.ok(promptText(calls.prompts[3]).includes('上一次执行没有走完'), '继续提示词应说明上一轮没走完')
+assert.ok(promptText(calls.prompts[3]).includes('中断原因'), '继续提示词应带中断原因')
+assert.ok(promptText(calls.prompts[3]).includes('不要重复已经完成的部分'))
 
 // ---------- 上报成功 ----------
 
@@ -553,6 +568,224 @@ assert.equal(editRunning.status, 409, '执行中任务不可编辑')
 assert.equal((await action({ action: 'cancel', id: taskCId })).status, 200)
 await action({ action: 'delete', id: taskCId })
 
+// ---------- 状态指纹：数据没变就不必让页面重渲染 ----------
+
+const stateOnce = await getState()
+assert.equal(typeof stateOnce.signature, 'string')
+assert.ok(stateOnce.signature.length > 0, '状态响应应带签名')
+assert.equal((await getState()).signature, stateOnce.signature, '没有变化时签名应保持一致')
+
+// ---------- 没有上报时：按回合结束状态推断结果 ----------
+
+const createdF = await action({
+  action: 'create',
+  task: {
+    title: '任务 F',
+    instruction: 'F 的任务说明',
+    acceptanceCriteria: '产物写入 out/f.txt',
+    workspaceId: 'ws-1',
+    scheduledAt: new Date(Date.now() - 1000).toISOString(),
+  },
+})
+assert.equal(createdF.status, 200)
+assert.equal(createdF.body.task.acceptanceCriteria, '产物写入 out/f.txt')
+assert.deepEqual(createdF.body.task.runs, [])
+const taskFId = createdF.body.task.id
+const runningF = await waitFor(async () => {
+  const task = findTask(await getState(), taskFId)
+  return task && task.status === 'running' ? task : null
+}, '任务 F 启动')
+assert.ok(
+  promptText(calls.prompts[calls.prompts.length - 1]).includes('验收条件（全部满足才算完成）'),
+  '启动提示词应带验收条件',
+)
+
+const sessionF = runningF.sessionId
+emit('session/event', { id: sessionF }, { type: 'turn/start' })
+emit('session/event', { id: sessionF }, { type: 'step/start', data: { turn: 1, step: 1 } })
+emit(
+  'session/event',
+  { id: sessionF },
+  {
+    type: 'tool/call',
+    data: {
+      turn: 1,
+      step: 1,
+      callId: 'call-write',
+      name: 'write',
+      arguments: JSON.stringify({ path: 'out/f.txt', content: 'ok' }),
+    },
+  },
+)
+emit('session/event', { id: sessionF }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+
+const succeededF = await waitFor(async () => {
+  const task = findTask(await getState(), taskFId)
+  return task && task.status === 'succeeded' ? task : null
+}, '没有上报时按回合结束推断成功')
+assert.equal(succeededF.lastReport, null, '推断结果不应伪造上报记录')
+const runF = succeededF.runs[succeededF.runs.length - 1]
+assert.equal(runF.status, 'succeeded')
+assert.equal(runF.inferred, true)
+assert.deepEqual(runF.files, ['out/f.txt'])
+assert.equal(succeededF.needsConfirm, true, '推断成功应等待用户确认')
+
+const ackedF = await action({ action: 'acknowledge', id: taskFId })
+assert.equal(ackedF.status, 200)
+assert.equal(ackedF.body.task.needsConfirm, false, '确认后不再提示')
+assert.equal((await action({ action: 'acknowledge', id: taskFId })).status, 200, '重复确认应幂等')
+
+// ---------- 推断不出结果时宁可记中断 ----------
+
+const createdG = await action({
+  action: 'create',
+  task: {
+    title: '任务 G',
+    instruction: 'G 的任务说明',
+    workspaceId: 'ws-1',
+    scheduledAt: new Date(Date.now() - 1000).toISOString(),
+  },
+})
+const taskGId = createdG.body.task.id
+const runningG = await waitFor(async () => {
+  const task = findTask(await getState(), taskGId)
+  return task && task.status === 'running' ? task : null
+}, '任务 G 启动')
+emit('session/event', { id: runningG.sessionId }, { type: 'turn/start' })
+emit('session/event', { id: runningG.sessionId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+const interruptedG = await waitFor(async () => {
+  const task = findTask(await getState(), taskGId)
+  return task && task.status === 'interrupted' ? task : null
+}, '没有执行任何步骤时记为中断')
+assert.ok(interruptedG.interruptReason.includes('没有执行任何步骤'))
+assert.equal(interruptedG.needsConfirm, true)
+
+const createdH = await action({
+  action: 'create',
+  task: {
+    title: '任务 H',
+    instruction: 'H 的任务说明',
+    workspaceId: 'ws-1',
+    scheduledAt: new Date(Date.now() - 1000).toISOString(),
+  },
+})
+const taskHId = createdH.body.task.id
+const runningH = await waitFor(async () => {
+  const task = findTask(await getState(), taskHId)
+  return task && task.status === 'running' ? task : null
+}, '任务 H 启动')
+const sessionH = runningH.sessionId
+emit('session/event', { id: sessionH }, { type: 'turn/start' })
+emit('session/event', { id: sessionH }, { type: 'step/start', data: { turn: 1, step: 1 } })
+emit('session/event', { id: sessionH }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+const interruptedH = await waitFor(async () => {
+  const task = findTask(await getState(), taskHId)
+  return task && task.status === 'interrupted' ? task : null
+}, '有步骤但没有改动文件时记为中断')
+assert.ok(interruptedH.interruptReason.includes('没有改动文件'))
+
+// ---------- 上报里的证据 ----------
+
+await action({ action: 'continue', id: taskHId })
+await waitFor(async () => {
+  const task = findTask(await getState(), taskHId)
+  return task && task.status === 'running' ? task : null
+}, '任务 H 继续后回到执行中')
+const reportedH = await tool.definition.execute(
+  { status: 'success', summary: 'H 已完成', evidence: ['out/h.md', 'npm test 通过'] },
+  { agent: { id: sessionH } },
+)
+assert.deepEqual(reportedH, { ok: true, taskId: taskHId, status: 'succeeded' })
+const succeededH = findTask(await getState(), taskHId)
+assert.deepEqual(succeededH.lastReport.evidence, ['out/h.md', 'npm test 通过'])
+const runH = succeededH.runs[succeededH.runs.length - 1]
+assert.equal(runH.status, 'succeeded')
+assert.equal(runH.inferred, false, '主动上报不算推断')
+
+// ---------- 接口只对 owner 开放 ----------
+
+const deniedState = await callRoute(STATE_PATH, { headers: { 'x-kanban-test-auth': 'deny' } })
+assert.equal(deniedState.status, 403)
+assert.equal((await deniedState.json()).ok, false)
+const deniedAction = await callRoute(ACTION_PATH, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'x-kanban-test-auth': 'deny' },
+  body: JSON.stringify({ action: 'nope' }),
+})
+assert.equal(deniedAction.status, 403)
+const boomState = await callRoute(STATE_PATH, { headers: { 'x-kanban-test-auth': 'boom' } })
+assert.equal(boomState.status, 403, '鉴权抛异常时应拒绝而不是放行')
+
+// ---------- 字段长度上限 ----------
+
+const tooLongTitle = await action({
+  action: 'create',
+  task: {
+    title: 'x'.repeat(121),
+    instruction: 'y',
+    workspaceId: 'ws-1',
+    scheduledAt: new Date().toISOString(),
+  },
+})
+assert.equal(tooLongTitle.status, 400, '标题超长应拒绝')
+const tooLongInstruction = await action({
+  action: 'create',
+  task: {
+    title: '长文',
+    instruction: 'y'.repeat(20_001),
+    workspaceId: 'ws-1',
+    scheduledAt: new Date().toISOString(),
+  },
+})
+assert.equal(tooLongInstruction.status, 400, '任务说明超长应拒绝')
+
+// ---------- 存储自愈：坏文件先备份，再重建 ----------
+
+const brokenDir = path.join(tempHome, 'broken')
+await mkdir(brokenDir, { recursive: true })
+await writeFile(path.join(brokenDir, 'tasks.json'), '{不是 JSON', 'utf8')
+const brokenStore = mod.createStore(path.join(brokenDir, 'tasks.json'))
+await brokenStore.load()
+assert.deepEqual(brokenStore.all(), [], '损坏的任务文件不应阻塞启动')
+const brokenBackups = await readdir(path.join(brokenDir, 'backups'))
+assert.equal(brokenBackups.length, 1, '损坏文件应被备份下来')
+await brokenStore.flush()
+const rebuilt = JSON.parse(await readFile(path.join(brokenDir, 'tasks.json'), 'utf8'))
+assert.equal(rebuilt.version, 2)
+assert.deepEqual(rebuilt.tasks, [])
+brokenStore.dispose()
+
+// ---------- 旧版本任务文件自动迁移 ----------
+
+const legacyDir = path.join(tempHome, 'legacy')
+await mkdir(legacyDir, { recursive: true })
+const legacyTask = {
+  id: 'legacy-1',
+  title: '旧任务',
+  instruction: '旧说明',
+  workspaceId: 'ws-1',
+  status: 'succeeded',
+  createdAt: 1,
+  updatedAt: 2,
+}
+await writeFile(path.join(legacyDir, 'tasks.json'), JSON.stringify({ version: 1, tasks: [legacyTask] }), 'utf8')
+const legacyStore = mod.createStore(path.join(legacyDir, 'tasks.json'))
+await legacyStore.load()
+const migrated = legacyStore.get('legacy-1')
+assert.equal(migrated.acceptanceCriteria, '')
+assert.deepEqual(migrated.runs, [])
+assert.equal(migrated.confirmedRunId, null)
+await legacyStore.flush()
+const migratedRaw = JSON.parse(await readFile(path.join(legacyDir, 'tasks.json'), 'utf8'))
+assert.equal(migratedRaw.version, 2, '写入后应升级为当前版本')
+legacyStore.dispose()
+
+// 清掉本轮新增的任务，落盘断言仍然要求空列表。
+for (const id of [taskFId, taskGId, taskHId]) {
+  await action({ action: 'archive', id })
+  await action({ action: 'delete', id })
+}
+
 // ---------- 落盘 ----------
 
 for (const dispose of disposers.reverse()) {
@@ -564,7 +797,7 @@ await sleep(300)
 
 const raw = await readFile(tasksFile(), 'utf8')
 const parsed = JSON.parse(raw)
-assert.equal(parsed.version, 1)
+assert.equal(parsed.version, 2)
 assert.deepEqual(parsed.tasks, [], '删除全部任务后文件应为空')
 
 await rm(tempHome, { recursive: true, force: true })
