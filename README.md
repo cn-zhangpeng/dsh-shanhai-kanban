@@ -108,12 +108,23 @@ DeepSeek Harness 任务看板插件（山海紫穹系列）。
 
 ## 安装
 
-### 方式一：插件命令（推荐）
+### 方式一：npm 安装（推荐）
 
-本插件为私有本地包，直接按目录安装（profile 内以 `link:` 方式引用）：
+已发布至 npm：[dsh-shanhai-kanban](https://www.npmjs.com/package/dsh-shanhai-kanban)
 
 ```bash
-dsh plugin --profile desktop add <本目录路径>
+dsh plugin --profile desktop add dsh-shanhai-kanban
+```
+
+> 锁定版本安装（更安全，推荐生产环境）：
+> ```bash
+> dsh plugin --profile desktop add dsh-shanhai-kanban@0.2.0
+> ```
+
+如需从源码调试，按目录安装（profile 内以 `link:` 方式引用）：
+
+```bash
+dsh plugin --profile desktop add <本仓库绝对路径>
 ```
 
 更新 / 卸载：
